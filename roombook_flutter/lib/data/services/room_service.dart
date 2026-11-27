@@ -1,9 +1,39 @@
+import 'dart:convert';
+import 'dart:typed_data';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/room_model.dart';
 
 /// Layanan untuk mengambil data ruangan dari Supabase
 class RoomService {
   final SupabaseClient _client = Supabase.instance.client;
+
+  /// Mengupload foto ruangan ke bucket 'room-images', fallback Data URI jika storage belum aktif
+  Future<String> uploadRoomPhotoBytes(
+    Uint8List bytes, {
+    String fileName = 'room.jpg',
+    String? mimeType,
+  }) async {
+    final ext = fileName.contains('.') ? fileName.split('.').last.toLowerCase() : 'jpg';
+    final safeExt = (ext == 'png' || ext == 'webp' || ext == 'jpeg' || ext == 'jpg') ? ext : 'jpg';
+    final resolvedMime = mimeType ??
+        (safeExt == 'png'
+            ? 'image/png'
+            : safeExt == 'webp'
+                ? 'image/webp'
+                : 'image/jpeg');
+    final storagePath = 'rooms/room_${DateTime.now().millisecondsSinceEpoch}.$safeExt';
+
+    try {
+      await _client.storage.from('room-images').uploadBinary(
+            storagePath,
+            bytes,
+            fileOptions: FileOptions(contentType: resolvedMime, upsert: true),
+          );
+      return _client.storage.from('room-images').getPublicUrl(storagePath);
+    } catch (_) {
+      return 'data:$resolvedMime;base64,${base64Encode(bytes)}';
+    }
+  }
 
   /// Mengambil semua ruangan dari tabel public.rooms
   Future<List<RoomModel>> fetchRooms() async {

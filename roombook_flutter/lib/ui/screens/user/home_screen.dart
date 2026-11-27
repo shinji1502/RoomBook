@@ -30,7 +30,9 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      Provider.of<RoomProvider>(context, listen: false).loadRooms();
+      final roomProvider = Provider.of<RoomProvider>(context, listen: false);
+      roomProvider.loadRooms();
+      roomProvider.initRealtimeSubscription();
     });
   }
 

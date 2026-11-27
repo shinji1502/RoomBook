@@ -326,6 +326,78 @@
     },
 
     /**
+     * Mengirim email reset kata sandi melalui Supabase Auth
+     * @param {string} email
+     */
+    async resetPassword(email) {
+      try {
+        const client = this.getClient();
+        const trimmedEmail = String(email || '').trim();
+        if (!trimmedEmail) {
+          return { success: false, message: 'Masukkan alamat email akun Anda terlebih dahulu.' };
+        }
+
+        const redirectTo = (typeof window !== 'undefined' && window.location)
+          ? (window.location.origin + window.location.pathname)
+          : undefined;
+
+        const { error } = await client.auth.resetPasswordForEmail(trimmedEmail, redirectTo ? { redirectTo } : undefined);
+        if (error) {
+          return { success: false, message: translateAuthError(error) };
+        }
+
+        return {
+          success: true,
+          message: `Tautan reset kata sandi telah dikirim ke ${trimmedEmail}. Periksa kotak masuk atau folder spam Anda.`
+        };
+      } catch (err) {
+        return { success: false, message: translateAuthError(err) };
+      }
+    },
+
+    /**
+     * Memperbarui nama lengkap pengguna di Supabase Auth & tabel public.profiles
+     * @param {string} fullName
+     */
+    async updateProfileName(fullName) {
+      try {
+        const client = this.getClient();
+        const cleanName = String(fullName || '').trim();
+        if (!cleanName || cleanName.length < 2) {
+          return { success: false, message: 'Nama lengkap minimal 2 karakter.' };
+        }
+        if (!this._currentUser) {
+          return { success: false, message: 'Sesi pengguna tidak ditemukan.' };
+        }
+
+        const { error: authErr } = await client.auth.updateUser({
+          data: { full_name: cleanName }
+        });
+        if (authErr) {
+          return { success: false, message: translateAuthError(authErr) };
+        }
+
+        const { data: updatedProf, error: profErr } = await client
+          .from('profiles')
+          .update({ full_name: cleanName })
+          .eq('id', this._currentUser.id)
+          .select('id, full_name, role')
+          .maybeSingle();
+
+        if (profErr) {
+          return { success: false, message: profErr.message || 'Gagal memperbarui profil.' };
+        }
+
+        this._currentProfile = updatedProf || { ...(this._currentProfile || {}), full_name: cleanName };
+        this.syncStore(this._currentUser, this._currentProfile);
+
+        return { success: true, profile: this._currentProfile, message: 'Nama profil berhasil diperbarui.' };
+      } catch (err) {
+        return { success: false, message: translateAuthError(err) };
+      }
+    },
+
+    /**
      * Memulihkan sesi saat halaman dimuat/direfresh
      * @returns {Promise<{ isAuthenticated: boolean, user: Object|null, profile: Object|null, role: string }>}
      */

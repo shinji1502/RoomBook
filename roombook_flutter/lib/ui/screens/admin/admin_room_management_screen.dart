@@ -1,4 +1,6 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../data/models/room_model.dart';
@@ -14,11 +16,15 @@ class AdminRoomManagementScreen extends StatefulWidget {
 }
 
 class _AdminRoomManagementScreenState extends State<AdminRoomManagementScreen> {
+  final ImagePicker _picker = ImagePicker();
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      Provider.of<RoomProvider>(context, listen: false).loadRooms();
+      final roomProvider = Provider.of<RoomProvider>(context, listen: false);
+      roomProvider.loadRooms();
+      roomProvider.initRealtimeSubscription();
     });
   }
 
@@ -28,130 +34,198 @@ class _AdminRoomManagementScreenState extends State<AdminRoomManagementScreen> {
     final capCtrl = TextEditingController(text: room != null ? room.capacity.toString() : '20');
     final floorCtrl = TextEditingController(text: room?.floor ?? 'Lantai 1');
     final facCtrl = TextEditingController(text: room?.facilities.join(', ') ?? 'AC Central, WiFi High-Speed, Proyektor');
-    final imgCtrl = TextEditingController(text: room?.imageUrl ?? '');
+    Uint8List? selectedPhotoBytes;
+    String? selectedFileName;
+    String? selectedMimeType;
 
     final formKey = GlobalKey<FormState>();
 
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Text(
-          isEditing ? 'Edit Data Ruangan' : 'Tambah Ruangan Baru',
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-        ),
-        content: SingleChildScrollView(
-          child: Form(
-            key: formKey,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                TextFormField(
-                  controller: nameCtrl,
-                  decoration: const InputDecoration(labelText: 'Nama Ruangan', hintText: 'Misal: Ruang Rapat Senat'),
-                  validator: (v) => v == null || v.trim().isEmpty ? 'Nama ruangan wajib diisi' : null,
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextFormField(
-                        controller: capCtrl,
-                        keyboardType: TextInputType.number,
-                        decoration: const InputDecoration(labelText: 'Kapasitas (Orang)'),
-                        validator: (v) {
-                          final n = int.tryParse(v ?? '');
-                          if (n == null || n <= 0) return 'Harus > 0';
-                          return null;
-                        },
-                      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Text(
+            isEditing ? 'Edit Data Ruangan' : 'Tambah Ruangan Baru',
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+          ),
+          content: SingleChildScrollView(
+            child: Form(
+              key: formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: AppTheme.surfaceContainerLow,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFFDDE2EB)),
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: TextFormField(
-                        controller: floorCtrl,
-                        decoration: const InputDecoration(labelText: 'Lokasi Lantai', hintText: 'Lantai 2'),
-                        validator: (v) => v == null || v.trim().isEmpty ? 'Wajib diisi' : null,
-                      ),
+                    child: Column(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(10),
+                          child: selectedPhotoBytes != null
+                              ? Image.memory(
+                                  selectedPhotoBytes!,
+                                  width: double.infinity,
+                                  height: 130,
+                                  fit: BoxFit.cover,
+                                )
+                              : (isEditing && room.imageUrl.isNotEmpty)
+                                  ? RoomImage(
+                                      imageUrl: room.imageUrl,
+                                      width: double.infinity,
+                                      height: 130,
+                                      fit: BoxFit.cover,
+                                    )
+                                  : Container(
+                                      width: double.infinity,
+                                      height: 110,
+                                      color: AppTheme.surfaceContainerHigh,
+                                      child: const Column(
+                                        mainAxisAlignment: MainAxisAlignment.center,
+                                        children: [
+                                          Icon(Icons.add_a_photo_rounded, size: 32, color: AppTheme.primary),
+                                          SizedBox(height: 6),
+                                          Text('Belum ada foto dipilih', style: TextStyle(fontSize: 12, color: AppTheme.onSurfaceVariant)),
+                                        ],
+                                      ),
+                                    ),
+                        ),
+                        const SizedBox(height: 8),
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            icon: const Icon(Icons.photo_library_rounded, size: 18),
+                            label: Text(selectedPhotoBytes != null || isEditing ? 'Ganti Foto Ruangan' : 'Pilih Foto dari Galeri'),
+                            onPressed: () async {
+                              final picked = await _picker.pickImage(
+                                source: ImageSource.gallery,
+                                maxWidth: 1000,
+                                maxHeight: 750,
+                                imageQuality: 70,
+                              );
+                              if (picked == null) return;
+                              final bytes = await picked.readAsBytes();
+                              setDialogState(() {
+                                selectedPhotoBytes = bytes;
+                                selectedFileName = picked.name;
+                                selectedMimeType = picked.mimeType;
+                              });
+                            },
+                          ),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: facCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'Fasilitas (Pisahkan Koma)',
-                    hintText: 'AC, Proyektor, WiFi, Sound System',
                   ),
-                  validator: (v) => v == null || v.trim().isEmpty ? 'Fasilitas wajib diisi' : null,
-                ),
-                const SizedBox(height: 12),
-                TextFormField(
-                  controller: imgCtrl,
-                  decoration: const InputDecoration(
-                    labelText: 'URL Gambar Ruangan (Opsional)',
-                    hintText: 'https://...',
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: nameCtrl,
+                    decoration: const InputDecoration(labelText: 'Nama Ruangan', hintText: 'Misal: Ruang Rapat Senat'),
+                    validator: (v) => v == null || v.trim().isEmpty ? 'Nama ruangan wajib diisi' : null,
                   ),
-                ),
-              ],
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          controller: capCtrl,
+                          keyboardType: TextInputType.number,
+                          decoration: const InputDecoration(labelText: 'Kapasitas (Orang)'),
+                          validator: (v) {
+                            final n = int.tryParse(v ?? '');
+                            if (n == null || n <= 0) return 'Harus > 0';
+                            return null;
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: TextFormField(
+                          controller: floorCtrl,
+                          decoration: const InputDecoration(labelText: 'Lokasi Lantai', hintText: 'Lantai 2'),
+                          validator: (v) => v == null || v.trim().isEmpty ? 'Wajib diisi' : null,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: facCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Fasilitas (Pisahkan Koma)',
+                      hintText: 'AC, Proyektor, WiFi, Sound System',
+                    ),
+                    validator: (v) => v == null || v.trim().isEmpty ? 'Fasilitas wajib diisi' : null,
+                  ),
+                ],
+              ),
             ),
           ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Batal'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              if (!formKey.currentState!.validate()) return;
-              Navigator.pop(ctx);
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Batal'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                if (!formKey.currentState!.validate()) return;
+                Navigator.pop(ctx);
 
-              final roomProvider = Provider.of<RoomProvider>(context, listen: false);
-              final facilities = facCtrl.text
-                  .split(',')
-                  .map((e) => e.trim())
-                  .where((e) => e.isNotEmpty)
-                  .toList();
+                final roomProvider = Provider.of<RoomProvider>(context, listen: false);
+                final facilities = facCtrl.text
+                    .split(',')
+                    .map((e) => e.trim())
+                    .where((e) => e.isNotEmpty)
+                    .toList();
 
-              try {
-                if (isEditing) {
-                  await roomProvider.updateRoom(
-                    roomId: room.id,
-                    name: nameCtrl.text.trim(),
-                    capacity: int.parse(capCtrl.text.trim()),
-                    floor: floorCtrl.text.trim(),
-                    facilities: facilities,
-                    imageUrl: imgCtrl.text.trim().isNotEmpty ? imgCtrl.text.trim() : null,
+                try {
+                  if (isEditing) {
+                    await roomProvider.updateRoom(
+                      roomId: room.id,
+                      name: nameCtrl.text.trim(),
+                      capacity: int.parse(capCtrl.text.trim()),
+                      floor: floorCtrl.text.trim(),
+                      facilities: facilities,
+                      imageUrl: room.imageUrl,
+                      imageBytes: selectedPhotoBytes,
+                      imageFileName: selectedFileName,
+                      imageMimeType: selectedMimeType,
+                    );
+                  } else {
+                    await roomProvider.createRoom(
+                      name: nameCtrl.text.trim(),
+                      capacity: int.parse(capCtrl.text.trim()),
+                      floor: floorCtrl.text.trim(),
+                      facilities: facilities,
+                      imageBytes: selectedPhotoBytes,
+                      imageFileName: selectedFileName,
+                      imageMimeType: selectedMimeType,
+                    );
+                  }
+
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(isEditing ? 'Ruangan berhasil diperbarui.' : 'Ruangan baru berhasil ditambahkan.'),
+                      backgroundColor: AppTheme.success,
+                    ),
                   );
-                } else {
-                  await roomProvider.createRoom(
-                    name: nameCtrl.text.trim(),
-                    capacity: int.parse(capCtrl.text.trim()),
-                    floor: floorCtrl.text.trim(),
-                    facilities: facilities,
-                    imageUrl: imgCtrl.text.trim().isNotEmpty ? imgCtrl.text.trim() : null,
+                } catch (e) {
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Gagal menyimpan ruangan: $e'), backgroundColor: AppTheme.error),
                   );
                 }
-
-                if (!mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(isEditing ? 'Ruangan berhasil diperbarui.' : 'Ruangan baru berhasil ditambahkan.'),
-                    backgroundColor: AppTheme.success,
-                  ),
-                );
-              } catch (e) {
-                if (!mounted) return;
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Gagal menyimpan ruangan: $e'), backgroundColor: AppTheme.error),
-                );
-              }
-            },
-            child: Text(isEditing ? 'Simpan Perubahan' : 'Tambahkan'),
-          ),
-        ],
+              },
+              child: Text(isEditing ? 'Simpan Perubahan' : 'Tambahkan'),
+            ),
+          ],
+        ),
       ),
     );
   }

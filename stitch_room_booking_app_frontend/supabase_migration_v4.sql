@@ -299,6 +299,55 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_te
 REVOKE ALL ON FUNCTION public.admin_delete_room(bigint) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.admin_delete_room(bigint) TO authenticated;
 
+-- 3d. Tandai Reservasi yang Sudah Lewat Jamnya Menjadi 'completed'
+CREATE OR REPLACE FUNCTION public.complete_expired_reservations()
+RETURNS jsonb AS $$
+DECLARE
+  v_uid uuid;
+  v_count integer := 0;
+  v_rec RECORD;
+  v_now timestamptz;
+BEGIN
+  v_uid := auth.uid();
+  IF v_uid IS NULL THEN
+    RAISE EXCEPTION 'Akses ditolak: Anda harus login.' USING ERRCODE = '42501';
+  END IF;
+
+  v_now := pg_catalog.clock_timestamp();
+
+  FOR v_rec IN
+    SELECT id
+    FROM public.reservations
+    WHERE status = 'approved'
+      AND end_time < v_now
+      AND (user_id = v_uid OR public.is_admin())
+    FOR UPDATE SKIP LOCKED
+  LOOP
+    UPDATE public.reservations
+    SET status = 'completed'
+    WHERE id = v_rec.id;
+
+    INSERT INTO public.reservation_history (reservation_id, action, notes, created_at)
+    VALUES (
+      v_rec.id,
+      'COMPLETED',
+      'Jadwal pemakaian ruangan telah berakhir dan ditandai selesai otomatis.',
+      v_now
+    );
+
+    v_count := v_count + 1;
+  END LOOP;
+
+  RETURN jsonb_build_object(
+    'success', true,
+    'completed_count', v_count
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp;
+
+REVOKE ALL ON FUNCTION public.complete_expired_reservations() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.complete_expired_reservations() TO authenticated;
+
 
 -- =========================================================================
 -- 4. AKTIFKAN REALTIME UNTUK TABEL ROOMS AGAR AKUN USER AUTO-SYNC

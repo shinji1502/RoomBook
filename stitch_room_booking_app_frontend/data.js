@@ -674,7 +674,9 @@ class AppStore {
       conflictOverlap: '',
       conflictingBooking: null,
       submittedAt: submittedAt,
-      rejectionReason: dbRecord.status === 'rejected' ? 'Ditolak oleh admin / dibatalkan.' : '',
+      rejectionReason: dbRecord.status === 'rejected'
+        ? 'Ditolak oleh administrator.'
+        : (dbRecord.status === 'cancelled' ? 'Dibatalkan oleh pemohon.' : ''),
       qrCodeUnlocked: dbRecord.status === 'approved',
       isFromDatabase: true
     };
@@ -1022,8 +1024,13 @@ class AppStore {
         uiItem.history = historyRecords;
         uiItem.historyLoaded = true;
 
-        // Ambil catatan penolakan/persetujuan terbaru dari reservation_history jika ada
-        const rejectEntry = historyRecords.slice().reverse().find(h => h.action === 'REJECTED' || h.action === 'CANCELLED');
+        // Ambil catatan penolakan/persetujuan/pembatalan terbaru dari reservation_history jika ada
+        const rejectEntry = historyRecords.slice().reverse().find(h =>
+          h.action === 'REJECTED' ||
+          h.action === 'CANCELLED' ||
+          h.action === 'CANCELLED_BY_USER' ||
+          h.action === 'CANCELLED_BY_ADMIN'
+        );
         if (rejectEntry && rejectEntry.notes) {
           uiItem.rejectionReason = rejectEntry.notes;
         }
@@ -1199,6 +1206,84 @@ class AppStore {
     this.notify();
 
     return data;
+  }
+
+  /**
+   * Memperbarui data ruangan melalui RoomService + menyegarkan daftar ruangan di store
+   */
+  async updateRoomSupabase({ roomId, name, capacity, floor, facilities, imageFile }) {
+    if (typeof window === 'undefined' || !window.RoomService || typeof window.RoomService.updateRoom !== 'function') {
+      throw new Error('Modul RoomService.updateRoom belum tersedia.');
+    }
+
+    const { data, error, storageMode } = await window.RoomService.updateRoom({
+      roomId,
+      name,
+      capacity,
+      floor,
+      facilities,
+      imageFile
+    });
+
+    if (error) {
+      throw error;
+    }
+
+    this.dataSource = 'supabase';
+    await this.loadRoomsFromDatabase();
+    this.notify();
+
+    return { data, storageMode };
+  }
+
+  /**
+   * Memproses check-in QR tiket melalui RPC check_in_reservation_safe
+   */
+  async checkInReservationSupabase(reservationId, qrCode = null) {
+    const client = typeof window !== 'undefined' ? window.supabaseClient : null;
+    if (!client) throw new Error('Client Supabase belum siap.');
+
+    const rawInput = String(reservationId || '').trim();
+    const roombookMatch = rawInput.match(/^ROOMBOOK-(\d+)-(\d+)$/i);
+    let numericId = NaN;
+    let resolvedQrCode = qrCode ? String(qrCode).trim() : null;
+
+    if (roombookMatch) {
+      numericId = parseInt(roombookMatch[1], 10);
+      if (!resolvedQrCode) resolvedQrCode = rawInput.toUpperCase();
+    } else {
+      numericId = parseInt(rawInput.replace(/^RB-/i, ''), 10);
+    }
+
+    if (isNaN(numericId) || numericId <= 0) {
+      throw new Error(`ID Reservasi (${reservationId}) tidak valid.`);
+    }
+
+    const { data, error } = await client.rpc('check_in_reservation_safe', {
+      p_reservation_id: numericId,
+      p_qr_code: resolvedQrCode
+    });
+
+    if (error) throw error;
+    await this.loadReservationsFromDatabase();
+    return data;
+  }
+
+  /**
+   * Menandai reservasi approved yang sudah melewati end_time menjadi 'completed'
+   */
+  async completeExpiredReservationsSupabase() {
+    const client = typeof window !== 'undefined' ? window.supabaseClient : null;
+    if (!client) return null;
+    try {
+      const { data, error } = await client.rpc('complete_expired_reservations');
+      if (!error && data && data.completed_count > 0) {
+        await this.loadReservationsFromDatabase();
+      }
+      return data || null;
+    } catch (_) {
+      return null;
+    }
   }
 
   /**

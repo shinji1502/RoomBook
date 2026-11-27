@@ -21,6 +21,10 @@
     _pendingRoomPhotoFile: null,
     _pendingRoomPhotoPreview: null,
     _targetDeleteRoomId: null,
+    _pendingCatalogFilter: 'all',
+    _catalogSearchQuery: '',
+    _liveRoomScheduleSlots: [],
+    _editingRoomId: null,
 
     async init() {
       // Inisialisasi Supabase Realtime channel
@@ -45,6 +49,20 @@
       const confirmDeleteRoomBtn = document.getElementById('btn-confirm-delete-room');
       if (confirmDeleteRoomBtn) {
         confirmDeleteRoomBtn.addEventListener('click', () => this.executeDeleteRoom());
+      }
+
+      // Bind modal forgot password, admin check-in, and edit profile
+      const submitForgotPwdBtn = document.getElementById('btn-submit-forgot-pwd');
+      if (submitForgotPwdBtn) {
+        submitForgotPwdBtn.addEventListener('click', () => this.executeForgotPassword());
+      }
+      const submitCheckInBtn = document.getElementById('btn-submit-admin-checkin');
+      if (submitCheckInBtn) {
+        submitCheckInBtn.addEventListener('click', () => this.executeAdminCheckIn());
+      }
+      const submitEditProfileBtn = document.getElementById('btn-submit-edit-profile');
+      if (submitEditProfileBtn) {
+        submitEditProfileBtn.addEventListener('click', () => this.executeEditProfileName());
       }
 
       // Bind modal reject pills
@@ -84,8 +102,11 @@
 
       // 3. Memuat data ruangan dari Supabase secara otomatis saat start
       if (RoomBookStore && typeof RoomBookStore.loadRoomsFromDatabase === 'function') {
-        RoomBookStore.loadRoomsFromDatabase().then(() => {
-          // 4. Memuat data reservasi dari Supabase setelah ruangan tersedia
+        RoomBookStore.loadRoomsFromDatabase().then(async () => {
+          // Sinkronkan status selesai (expired approved) lalu muat reservasi
+          if (sessionState.isAuthenticated && typeof RoomBookStore.completeExpiredReservationsSupabase === 'function') {
+            await RoomBookStore.completeExpiredReservationsSupabase();
+          }
           if (RoomBookStore && typeof RoomBookStore.loadReservationsFromDatabase === 'function') {
             RoomBookStore.loadReservationsFromDatabase();
           }
@@ -423,7 +444,7 @@
                       <label class="font-label-md text-label-md text-on-surface font-semibold" for="login-password">
                         Kata Sandi
                       </label>
-                      <button class="font-label-sm text-label-sm text-secondary hover:text-primary transition-colors cursor-pointer" onclick="RoomBookApp.showToast('Fitur reset sandi terhubung via Supabase Auth.', 'mail')" type="button">
+                      <button class="font-label-sm text-label-sm text-secondary hover:text-primary transition-colors cursor-pointer" onclick="RoomBookApp.openForgotPasswordModal()" type="button">
                         Lupa Password?
                       </button>
                     </div>
@@ -629,7 +650,10 @@
         }
 
         if (RoomBookStore && typeof RoomBookStore.loadRoomsFromDatabase === 'function') {
-          RoomBookStore.loadRoomsFromDatabase().then(() => {
+          RoomBookStore.loadRoomsFromDatabase().then(async () => {
+            if (typeof RoomBookStore.completeExpiredReservationsSupabase === 'function') {
+              await RoomBookStore.completeExpiredReservationsSupabase();
+            }
             if (typeof RoomBookStore.loadReservationsFromDatabase === 'function') {
               RoomBookStore.loadReservationsFromDatabase();
             }
@@ -793,6 +817,18 @@
           statusText = 'rose-700';
           statusLabel = 'Ditolak Admin';
           statusIcon = 'cancel';
+        } else if (latestBooking.status === 'cancelled') {
+          statusColor = 'slate-400';
+          statusBg = 'slate-100';
+          statusText = 'slate-700';
+          statusLabel = 'Dibatalkan';
+          statusIcon = 'block';
+        } else if (latestBooking.status === 'completed') {
+          statusColor = 'indigo-500';
+          statusBg = 'indigo-50';
+          statusText = 'indigo-700';
+          statusLabel = 'Selesai Digunakan';
+          statusIcon = 'task_alt';
         }
       }
 
@@ -802,6 +838,9 @@
       const indonesianMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
       const now = new Date();
       const todayLabel = `${now.getDate()} ${indonesianMonths[now.getMonth()]}`;
+      const notifMsg = pendingCount > 0
+        ? `${pendingCount} reservasi menunggu persetujuan & ${approvedCount} disetujui`
+        : `${approvedCount} reservasi aktif telah disetujui`;
 
       return `
         <!-- Shell Header -->
@@ -823,7 +862,7 @@
                 </p>
               </div>
               <div class="relative flex items-center gap-2">
-                <button aria-label="Notifikasi penting" onclick="RoomBookApp.showToast('Semua notifikasi terbaru telah sinkron')" class="relative w-10 h-10 rounded-full bg-surface-container flex items-center justify-center text-primary shadow-sm hover:bg-surface-container-high transition-transform active:scale-95" type="button">
+                <button aria-label="Notifikasi penting" onclick="RoomBookApp.showToast('${notifMsg}', 'notifications')" class="relative w-10 h-10 rounded-full bg-surface-container flex items-center justify-center text-primary shadow-sm hover:bg-surface-container-high transition-transform active:scale-95" type="button">
                   <span class="material-symbols-outlined text-[20px]">notifications</span>
                   ${pendingCount > 0 ? '<span class="absolute top-2 right-2 w-2.5 h-2.5 bg-error rounded-full ring-2 ring-surface"></span>' : ''}
                 </button>
@@ -839,24 +878,24 @@
                 <span class="material-symbols-outlined absolute left-3.5 text-on-surface-variant text-[20px] pointer-events-none">search</span>
                 <input class="w-full h-12 pl-10 pr-4 bg-surface-container-lowest rounded-xl font-body-md text-body-md text-on-surface placeholder:text-outline shadow-sm focus:outline-none focus:bg-surface-container-low transition-all" placeholder="Cari ruangan rapat, auditorium..." type="text" oninput="RoomBookApp.handleDashboardSearch(this.value)"/>
               </div>
-              <button aria-label="Filter Pencarian Ruangan" onclick="RoomBookApp.navigate('#user/ketersediaan')" class="w-12 h-12 rounded-xl bg-primary text-on-primary flex items-center justify-center shadow-md active:scale-95 transition-transform" type="button">
+              <button aria-label="Filter Pencarian Ruangan" onclick="RoomBookApp.openCatalogWithFilter('all')" class="w-12 h-12 rounded-xl bg-primary text-on-primary flex items-center justify-center shadow-md active:scale-95 transition-transform" type="button">
                 <span class="material-symbols-outlined text-[22px]">tune</span>
               </button>
             </div>
 
             <!-- Quick Filter Pills -->
             <div class="flex items-center gap-2 overflow-x-auto pb-1 -mx-margin px-margin">
-              <button onclick="RoomBookApp.navigate('#user/ketersediaan')" class="px-3.5 py-1.5 rounded-full bg-primary text-on-primary font-label-sm text-label-sm whitespace-nowrap shadow-sm">
+              <button onclick="RoomBookApp.openCatalogWithFilter('all')" class="px-3.5 py-1.5 rounded-full bg-primary text-on-primary font-label-sm text-label-sm whitespace-nowrap shadow-sm cursor-pointer">
                 Semua Ruang
               </button>
-              <button onclick="RoomBookApp.navigate('#user/ketersediaan')" class="px-3.5 py-1.5 rounded-full bg-surface-container-lowest text-on-surface-variant font-label-sm text-label-sm whitespace-nowrap shadow-sm hover:bg-surface-container-low">
-                Kapasitas &gt; 20
+              <button onclick="RoomBookApp.openCatalogWithFilter('large')" class="px-3.5 py-1.5 rounded-full bg-surface-container-lowest text-on-surface-variant font-label-sm text-label-sm whitespace-nowrap shadow-sm hover:bg-surface-container-low cursor-pointer">
+                Kapasitas ≥ 20
               </button>
-              <button onclick="RoomBookApp.navigate('#user/ketersediaan')" class="px-3.5 py-1.5 rounded-full bg-surface-container-lowest text-on-surface-variant font-label-sm text-label-sm whitespace-nowrap shadow-sm hover:bg-surface-container-low">
+              <button onclick="RoomBookApp.openCatalogWithFilter('floor3')" class="px-3.5 py-1.5 rounded-full bg-surface-container-lowest text-on-surface-variant font-label-sm text-label-sm whitespace-nowrap shadow-sm hover:bg-surface-container-low cursor-pointer">
                 Lantai 3
               </button>
-              <button onclick="RoomBookApp.navigate('#user/ketersediaan')" class="px-3.5 py-1.5 rounded-full bg-surface-container-lowest text-on-surface-variant font-label-sm text-label-sm whitespace-nowrap shadow-sm hover:bg-surface-container-low">
-                Video Conference
+              <button onclick="RoomBookApp.openCatalogWithFilter('projector')" class="px-3.5 py-1.5 rounded-full bg-surface-container-lowest text-on-surface-variant font-label-sm text-label-sm whitespace-nowrap shadow-sm hover:bg-surface-container-low cursor-pointer">
+                Proyektor / AV
               </button>
             </div>
 
@@ -924,7 +963,7 @@
                     ${RoomBookStore.getRooms().length}
                   </span>
                   <span class="px-2 py-0.5 rounded-full text-[11px] font-semibold ${RoomBookStore.dataSource === 'supabase' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">
-                    ${RoomBookStore.dataSource === 'supabase' ? 'Supabase DB' : 'Fallback Dummy'}
+                    ${RoomBookStore.dataSource === 'supabase' ? 'Supabase DB' : 'Data Lokal'}
                   </span>
                 </div>
                 <button onclick="RoomBookApp.navigate('#user/ketersediaan')" class="font-label-md text-label-md text-secondary font-semibold hover:underline flex items-center gap-0.5">
@@ -969,9 +1008,6 @@
               <button onclick="RoomBookStore.loadRoomsFromDatabase()" class="px-3.5 py-2 rounded-xl bg-primary text-on-primary font-label-sm font-semibold hover:bg-primary-container transition-all active:scale-95 shadow-sm">
                 Coba Lagi
               </button>
-              <button onclick="RoomBookStore.useFallbackData()" class="px-3.5 py-2 rounded-xl bg-surface-container text-on-surface font-label-sm font-semibold hover:bg-surface-container-high transition-all active:scale-95">
-                Gunakan Fallback Dummy
-              </button>
             </div>
           </div>
         `;
@@ -993,10 +1029,6 @@
               <button onclick="RoomBookStore.loadRoomsFromDatabase()" class="px-3.5 py-2 rounded-xl bg-primary text-on-primary font-label-sm font-semibold flex items-center gap-1.5 shadow-sm hover:bg-primary-container active:scale-95 transition-all">
                 <span class="material-symbols-outlined text-[16px]">refresh</span>
                 <span>Refresh Supabase</span>
-              </button>
-              <button onclick="RoomBookStore.useFallbackData()" class="px-3.5 py-2 rounded-xl bg-surface-container text-on-surface font-label-sm font-semibold flex items-center gap-1.5 hover:bg-surface-container-high active:scale-95 transition-all">
-                <span class="material-symbols-outlined text-[16px]">visibility</span>
-                <span>Lihat Data Simulasi Dummy</span>
               </button>
             </div>
           </div>
@@ -1084,8 +1116,48 @@
     // ==========================================
     // 3. KETERSEDIAAN RUANGAN (CATALOG) VIEW
     // ==========================================
+    openCatalogWithFilter(type = 'all') {
+      this._pendingCatalogFilter = type || 'all';
+      this._catalogSearchQuery = '';
+      this.navigate('#user/ketersediaan');
+    },
+
+    applyRoomCategoryFilter(rooms, type) {
+      const list = Array.isArray(rooms) ? rooms : [];
+      if (type === 'large') {
+        return list.filter(r => Number(r.capacity || 0) >= 20);
+      }
+      if (type === 'small') {
+        return list.filter(r => Number(r.capacity || 0) <= 10);
+      }
+      if (type === 'floor3') {
+        return list.filter(r => `${r.floor || ''} ${r.name || ''}`.toLowerCase().includes('lantai 3'));
+      }
+      if (type === 'projector') {
+        return list.filter(r => {
+          const text = `${(r.facilities || []).map(f => f.name || f).join(' ')} ${r.description || ''}`.toLowerCase();
+          return text.includes('proyektor') || text.includes('projector') || text.includes('lcd') || text.includes('video') || text.includes('led') || text.includes('sound');
+        });
+      }
+      return list;
+    },
+
     renderKetersediaanView() {
       const rooms = [...RoomBookStore.getRooms()].sort((a, b) => Number(b.dbId || 0) - Number(a.dbId || 0));
+      const activeType = this._pendingCatalogFilter || 'all';
+      const searchQ = (this._catalogSearchQuery || '').toLowerCase().trim();
+      let filtered = this.applyRoomCategoryFilter(rooms, activeType);
+      if (searchQ) {
+        filtered = filtered.filter(r =>
+          (r.name || '').toLowerCase().includes(searchQ) ||
+          (r.description || '').toLowerCase().includes(searchQ) ||
+          (r.floor || '').toLowerCase().includes(searchQ) ||
+          String(r.capacity || '').includes(searchQ)
+        );
+      }
+      const pillClass = (t) => activeType === t
+        ? 'filter-pill px-3.5 py-1.5 rounded-full bg-primary text-on-primary font-label-sm text-label-sm whitespace-nowrap shadow-sm cursor-pointer'
+        : 'filter-pill px-3.5 py-1.5 rounded-full bg-surface-container-lowest text-on-surface-variant font-label-sm text-label-sm whitespace-nowrap shadow-sm hover:bg-surface-container-low cursor-pointer';
 
       return `
         <!-- Shell Header with Back Button -->
@@ -1099,32 +1171,44 @@
                 <p class="font-body-sm text-body-sm text-on-surface-variant">Pilih ruangan yang sesuai kebutuhan tim &amp; agenda</p>
               </div>
               <span class="px-2.5 py-1 rounded-full text-[11px] font-semibold ${RoomBookStore.dataSource === 'supabase' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}">
-                ${RoomBookStore.dataSource === 'supabase' ? 'Supabase DB' : 'Fallback Dummy'}
+                ${RoomBookStore.dataSource === 'supabase' ? 'Supabase DB' : 'Data Lokal'}
               </span>
             </div>
 
             <!-- Search Field -->
             <div class="relative flex items-center">
               <span class="material-symbols-outlined absolute left-3.5 text-on-surface-variant text-[20px] pointer-events-none">search</span>
-              <input id="room-search-input" oninput="RoomBookApp.filterRoomsList(this.value)" class="w-full h-11 pl-10 pr-4 bg-surface-container-lowest rounded-xl font-body-md text-body-md text-on-surface placeholder:text-outline shadow-sm focus:outline-none focus:ring-1 focus:ring-primary" placeholder="Cari nama ruangan atau kapasitas..." type="text"/>
+              <input id="room-search-input" value="${this._catalogSearchQuery || ''}" oninput="RoomBookApp.filterRoomsList(this.value)" class="w-full h-11 pl-10 pr-4 bg-surface-container-lowest rounded-xl font-body-md text-body-md text-on-surface placeholder:text-outline shadow-sm focus:outline-none focus:ring-1 focus:ring-primary" placeholder="Cari nama ruangan atau kapasitas..." type="text"/>
             </div>
 
             <!-- Filter Pills -->
             <div class="flex items-center gap-2 overflow-x-auto pb-1 -mx-margin px-margin" id="catalog-filter-pills">
-              <button onclick="RoomBookApp.filterRoomsCategory('all', this)" class="filter-pill px-3.5 py-1.5 rounded-full bg-primary text-on-primary font-label-sm text-label-sm whitespace-nowrap shadow-sm">
+              <button onclick="RoomBookApp.filterRoomsCategory('all', this)" class="${pillClass('all')}">
                 Semua Ruang (${rooms.length})
               </button>
-              <button onclick="RoomBookApp.filterRoomsCategory('large', this)" class="filter-pill px-3.5 py-1.5 rounded-full bg-surface-container-lowest text-on-surface-variant font-label-sm text-label-sm whitespace-nowrap shadow-sm hover:bg-surface-container-low">
+              <button onclick="RoomBookApp.filterRoomsCategory('large', this)" class="${pillClass('large')}">
                 Kapasitas Besar (≥20)
               </button>
-              <button onclick="RoomBookApp.filterRoomsCategory('small', this)" class="filter-pill px-3.5 py-1.5 rounded-full bg-surface-container-lowest text-on-surface-variant font-label-sm text-label-sm whitespace-nowrap shadow-sm hover:bg-surface-container-low">
+              <button onclick="RoomBookApp.filterRoomsCategory('small', this)" class="${pillClass('small')}">
                 Diskusi Tim (≤10)
+              </button>
+              <button onclick="RoomBookApp.filterRoomsCategory('floor3', this)" class="${pillClass('floor3')}">
+                Lantai 3
+              </button>
+              <button onclick="RoomBookApp.filterRoomsCategory('projector', this)" class="${pillClass('projector')}">
+                Proyektor / AV
               </button>
             </div>
 
             <!-- Room List -->
             <div class="flex flex-col gap-4" id="catalog-room-list">
-              ${this.renderRoomsContent(rooms)}
+              ${filtered.length === 0 ? `
+                <div class="p-8 text-center bg-surface-container-lowest rounded-2xl flex flex-col items-center gap-2">
+                  <span class="material-symbols-outlined text-outline text-4xl">search_off</span>
+                  <p class="font-headline-sm text-on-surface">Tidak ada ruangan sesuai filter</p>
+                  <p class="font-body-sm text-on-surface-variant">Pilih kategori lain atau ubah kata kunci pencarian.</p>
+                </div>
+              ` : this.renderRoomsContent(filtered)}
             </div>
           </div>
         </main>
@@ -1136,12 +1220,13 @@
     bindKetersediaanEvents() {},
 
     filterRoomsList(query) {
-      const q = query.toLowerCase().trim();
-      const rooms = RoomBookStore.getRooms();
+      this._catalogSearchQuery = String(query || '');
+      const q = this._catalogSearchQuery.toLowerCase().trim();
+      const baseRooms = this.applyRoomCategoryFilter(RoomBookStore.getRooms(), this._pendingCatalogFilter || 'all');
       const container = document.getElementById('catalog-room-list');
       if (!container) return;
 
-      const filtered = rooms.filter(r => 
+      const filtered = !q ? baseRooms : baseRooms.filter(r => 
         (r.name || '').toLowerCase().includes(q) || 
         (r.description || '').toLowerCase().includes(q) ||
         (r.floor || '').toLowerCase().includes(q) ||
@@ -1162,25 +1247,36 @@
     },
 
     filterRoomsCategory(type, btn) {
+      this._pendingCatalogFilter = type || 'all';
       document.querySelectorAll('#catalog-filter-pills .filter-pill').forEach(p => {
-        p.className = 'filter-pill px-3.5 py-1.5 rounded-full bg-surface-container-lowest text-on-surface-variant font-label-sm text-label-sm whitespace-nowrap shadow-sm hover:bg-surface-container-low';
+        p.className = 'filter-pill px-3.5 py-1.5 rounded-full bg-surface-container-lowest text-on-surface-variant font-label-sm text-label-sm whitespace-nowrap shadow-sm hover:bg-surface-container-low cursor-pointer';
       });
       if (btn) {
-        btn.className = 'filter-pill px-3.5 py-1.5 rounded-full bg-primary text-on-primary font-label-sm text-label-sm whitespace-nowrap shadow-sm';
+        btn.className = 'filter-pill px-3.5 py-1.5 rounded-full bg-primary text-on-primary font-label-sm text-label-sm whitespace-nowrap shadow-sm cursor-pointer';
       }
 
-      const rooms = RoomBookStore.getRooms();
+      const rooms = this.applyRoomCategoryFilter(RoomBookStore.getRooms(), this._pendingCatalogFilter);
+      const q = (this._catalogSearchQuery || '').toLowerCase().trim();
+      const filtered = !q ? rooms : rooms.filter(r =>
+        (r.name || '').toLowerCase().includes(q) ||
+        (r.description || '').toLowerCase().includes(q) ||
+        (r.floor || '').toLowerCase().includes(q) ||
+        String(r.capacity || '').includes(q)
+      );
       const container = document.getElementById('catalog-room-list');
       if (!container) return;
 
-      let filtered = rooms;
-      if (type === 'large') {
-        filtered = rooms.filter(r => r.capacity >= 20);
-      } else if (type === 'small') {
-        filtered = rooms.filter(r => r.capacity <= 10);
+      if (filtered.length === 0) {
+        container.innerHTML = `
+          <div class="p-8 text-center bg-surface-container-lowest rounded-2xl flex flex-col items-center gap-2">
+            <span class="material-symbols-outlined text-outline text-4xl">search_off</span>
+            <p class="font-headline-sm text-on-surface">Tidak ada ruangan sesuai kategori ini</p>
+            <p class="font-body-sm text-on-surface-variant">Silakan pilih filter kategori ruangan lainnya.</p>
+          </div>
+        `;
+      } else {
+        container.innerHTML = filtered.map(room => this.renderRoomCard(room)).join('');
       }
-
-      container.innerHTML = filtered.map(room => this.renderRoomCard(room)).join('');
     },
 
     // ==========================================
@@ -1319,61 +1415,13 @@
               <p class="font-body-sm text-body-sm text-on-surface-variant mb-space-md">
                 Pilih waktu yang tersedia untuk memastikan reservasi tidak bentrok.
               </p>
-              <div class="space-y-space-sm">
-                ${(room.scheduleToday || []).map(slot => {
-                  if (slot.status === 'available') {
-                    return `
-                      <div class="flex items-center justify-between p-3 rounded-lg bg-emerald-50 text-emerald-950">
-                        <div class="flex items-center gap-3">
-                          <div class="w-8 h-8 rounded-full bg-emerald-200 text-emerald-800 flex items-center justify-center">
-                            <span class="material-symbols-outlined text-[18px]">check_circle</span>
-                          </div>
-                          <div>
-                            <p class="font-label-md text-label-md font-semibold text-emerald-900">${slot.time}</p>
-                            <p class="font-body-sm text-body-sm text-emerald-700">${slot.title}</p>
-                          </div>
-                        </div>
-                        <span class="px-2.5 py-1 rounded-full bg-emerald-200/80 text-emerald-900 font-label-sm text-label-sm font-semibold">
-                          ${slot.label}
-                        </span>
-                      </div>
-                    `;
-                  } else if (slot.status === 'booked') {
-                    return `
-                      <div class="flex items-center justify-between p-3 rounded-lg bg-primary-fixed/40 text-on-primary-fixed">
-                        <div class="flex items-center gap-3">
-                          <div class="w-8 h-8 rounded-full bg-primary text-on-primary flex items-center justify-center">
-                            <span class="material-symbols-outlined text-[18px]">event_busy</span>
-                          </div>
-                          <div>
-                            <p class="font-label-md text-label-md font-semibold text-primary">${slot.time}</p>
-                            <p class="font-body-sm text-body-sm text-on-primary-fixed-variant">${slot.title}</p>
-                          </div>
-                        </div>
-                        <span class="px-2.5 py-1 rounded-full bg-primary text-on-primary font-label-sm text-label-sm font-medium">
-                          ${slot.label}
-                        </span>
-                      </div>
-                    `;
-                  } else {
-                    return `
-                      <div class="flex items-center justify-between p-3 rounded-lg bg-surface-container-high text-on-surface-variant">
-                        <div class="flex items-center gap-3">
-                          <div class="w-8 h-8 rounded-full bg-surface-dim text-on-surface-variant flex items-center justify-center">
-                            <span class="material-symbols-outlined text-[18px]">coffee</span>
-                          </div>
-                          <div>
-                            <p class="font-label-md text-label-md font-semibold text-on-surface">${slot.time}</p>
-                            <p class="font-body-sm text-body-sm text-on-surface-variant">${slot.title}</p>
-                          </div>
-                        </div>
-                        <span class="px-2.5 py-1 rounded-full bg-surface-variant text-on-surface-variant font-label-sm text-label-sm">
-                          ${slot.label}
-                        </span>
-                      </div>
-                    `;
-                  }
-                }).join('')}
+              <div class="space-y-space-sm" id="room-today-schedule-list">
+                <div class="flex items-center justify-between p-3 rounded-lg bg-surface-container text-on-surface-variant">
+                  <div class="flex items-center gap-2.5">
+                    <span class="material-symbols-outlined text-[18px] animate-spin text-primary">progress_activity</span>
+                    <span class="font-body-sm text-body-sm">Memuat jadwal terpakai hari ini dari server...</span>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -1413,7 +1461,87 @@
       `;
     },
 
-    bindDetailRuanganEvents() {},
+    bindDetailRuanganEvents() {
+      const roomId = RoomBookStore.selectedRoomId;
+      const room = RoomBookStore.getRoomById(roomId);
+      if (room) {
+        this.loadDetailRoomSchedule(room);
+      }
+    },
+
+    async loadDetailRoomSchedule(room) {
+      const container = document.getElementById('room-today-schedule-list');
+      if (!container) return;
+
+      const dbRoomId = this.resolveRoomDatabaseId(room.id) || room.dbId;
+      const nowWib = new Date(Date.now() + 7 * 60 * 60 * 1000);
+      const todayIso = nowWib.toISOString().split('T')[0];
+
+      let slots = [];
+      if (dbRoomId && typeof window !== 'undefined' && window.RoomService && typeof window.RoomService.fetchRoomSchedule === 'function') {
+        const res = await window.RoomService.fetchRoomSchedule(dbRoomId, todayIso);
+        if (Array.isArray(res.data)) slots = res.data;
+      }
+
+      if (slots.length === 0) {
+        const localBooked = (RoomBookStore.getReservations() || []).filter(r => {
+          if (r.status !== 'approved' && r.status !== 'pending') return false;
+          const matches = String(r.roomId) === String(room.id) || (dbRoomId && Number(this.resolveRoomDatabaseId(r.roomId)) === Number(dbRoomId));
+          if (!matches || !r.startTime) return false;
+          const rWib = new Date(new Date(r.startTime).getTime() + 7 * 60 * 60 * 1000);
+          return rWib.toISOString().split('T')[0] === todayIso;
+        });
+        slots = localBooked.map(r => ({
+          event_name: r.eventName,
+          start_time: r.startTime,
+          end_time: r.endTime,
+          status: r.status
+        }));
+      }
+
+      if (slots.length === 0) {
+        container.innerHTML = `
+          <div class="flex items-center justify-between p-3 rounded-lg bg-emerald-50 text-emerald-950">
+            <div class="flex items-center gap-3">
+              <div class="w-8 h-8 rounded-full bg-emerald-200 text-emerald-800 flex items-center justify-center">
+                <span class="material-symbols-outlined text-[18px]">check_circle</span>
+              </div>
+              <div>
+                <p class="font-label-md text-label-md font-semibold text-emerald-900">08:00 - 17:00 WIB</p>
+                <p class="font-body-sm text-body-sm text-emerald-700">Ruangan kosong &amp; tersedia sepanjang hari ini</p>
+              </div>
+            </div>
+            <span class="px-2.5 py-1 rounded-full bg-emerald-200/80 text-emerald-900 font-label-sm text-label-sm font-semibold">Tersedia</span>
+          </div>
+        `;
+        return;
+      }
+
+      const fTime = (iso) => {
+        const d = new Date(iso);
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      };
+
+      container.innerHTML = slots.map(slot => {
+        const isApproved = slot.status === 'approved';
+        return `
+          <div class="flex items-center justify-between p-3 rounded-lg ${isApproved ? 'bg-primary-fixed/40 text-on-primary-fixed' : 'bg-amber-50 text-amber-950'}">
+            <div class="flex items-center gap-3">
+              <div class="w-8 h-8 rounded-full ${isApproved ? 'bg-primary text-on-primary' : 'bg-amber-200 text-amber-800'} flex items-center justify-center">
+                <span class="material-symbols-outlined text-[18px]">${isApproved ? 'event_busy' : 'hourglass_top'}</span>
+              </div>
+              <div>
+                <p class="font-label-md text-label-md font-semibold ${isApproved ? 'text-primary' : 'text-amber-900'}">${fTime(slot.start_time)} - ${fTime(slot.end_time)} WIB</p>
+                <p class="font-body-sm text-body-sm ${isApproved ? 'text-on-primary-fixed-variant' : 'text-amber-800'}">${slot.event_name || 'Jadwal Ruangan'}</p>
+              </div>
+            </div>
+            <span class="px-2.5 py-1 rounded-full ${isApproved ? 'bg-primary text-on-primary' : 'bg-amber-200 text-amber-900'} font-label-sm text-label-sm font-medium">
+              ${isApproved ? 'Terisi' : 'Pending'}
+            </span>
+          </div>
+        `;
+      }).join('');
+    },
 
     openRoomDetail(roomId) {
       RoomBookStore.selectedRoomId = roomId;
@@ -1603,6 +1731,11 @@
                     </div>
                   </div>
                 </div>
+
+                <!-- Live Schedule Preview Box from get_room_schedule RPC -->
+                <div id="form-live-schedule-box" class="mt-2 pt-2.5 border-t border-surface-container text-xs text-on-surface-variant">
+                  Memeriksa jadwal ruangan pada tanggal ini...
+                </div>
               </div>
 
               <!-- Field: Jumlah Peserta dengan Micro-validation -->
@@ -1730,8 +1863,10 @@
         });
       });
 
-      // Jalankan pengecekan bentrok awal saat form dimuat
+      // Jalankan pengecekan bentrok awal saat form dimuat + muat slot jadwal RPC
+      const initialIsoDate = document.getElementById('native-date-picker')?.value || new Date().toISOString().split('T')[0];
       this.checkFormConflict();
+      this.loadFormRoomSchedule(initialIsoDate);
     },
 
     openDatePicker() {
@@ -1761,6 +1896,46 @@
       const nativePicker = document.getElementById('native-date-picker');
       if (nativePicker && nativePicker.value !== isoVal) {
         nativePicker.value = isoVal;
+      }
+      this.loadFormRoomSchedule(isoVal);
+      this.checkFormConflict();
+    },
+
+    async loadFormRoomSchedule(isoDateStr) {
+      const box = document.getElementById('form-live-schedule-box');
+      const selectedRoomId = RoomBookStore.selectedRoomId;
+      const dbRoomId = this.resolveRoomDatabaseId(selectedRoomId);
+      const isoDate = isoDateStr || new Date().toISOString().split('T')[0];
+
+      if (!dbRoomId || typeof window === 'undefined' || !window.RoomService || typeof window.RoomService.fetchRoomSchedule !== 'function') {
+        this._liveRoomScheduleSlots = [];
+        if (box) {
+          box.innerHTML = '<span class="text-emerald-700 font-medium flex items-center gap-1.5"><span class="material-symbols-outlined text-[15px]">event_available</span>Slot waktu masih kosong pada tanggal ini.</span>';
+        }
+        this.checkFormConflict();
+        return;
+      }
+
+      if (box) {
+        box.innerHTML = '<span class="text-on-surface-variant flex items-center gap-1.5"><span class="material-symbols-outlined text-[15px] animate-spin">progress_activity</span>Memuat jadwal terpakai...</span>';
+      }
+
+      const { data } = await window.RoomService.fetchRoomSchedule(dbRoomId, isoDate);
+      this._liveRoomScheduleSlots = Array.isArray(data) ? data : [];
+
+      if (box) {
+        if (this._liveRoomScheduleSlots.length === 0) {
+          box.innerHTML = '<span class="text-emerald-700 font-medium flex items-center gap-1.5"><span class="material-symbols-outlined text-[15px]">event_available</span>Belum ada jadwal bentrok pada tanggal ini.</span>';
+        } else {
+          const badges = this._liveRoomScheduleSlots.map(s => {
+            const st = new Date(s.start_time);
+            const et = new Date(s.end_time);
+            const fTime = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+            const statusText = s.status === 'approved' ? 'Disetujui' : 'Pending';
+            return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-rose-50 text-rose-700 border border-rose-200 font-medium">${fTime(st)}–${fTime(et)} (${statusText})</span>`;
+          }).join(' ');
+          box.innerHTML = `<div class="space-y-1"><p class="text-[11px] font-semibold text-on-surface">Slot Terjadwal Pada Tanggal Ini:</p><div class="flex flex-wrap gap-1.5">${badges}</div></div>`;
+        }
       }
       this.checkFormConflict();
     },
@@ -1822,9 +1997,10 @@
       const startMs = startParsed.date.getTime();
       const endMs = endParsed.date.getTime();
 
-      const conflicting = (RoomBookStore.reservations || []).find(r => {
+      const conflictingLocal = (RoomBookStore.reservations || []).find(r => {
         if (r.status !== 'pending' && r.status !== 'approved') return false;
-        const matchesRoom = (String(r.roomId) === String(selectedRoomId)) || (r.dbId && dbRoomId && Number(r.dbId) === Number(dbRoomId));
+        const rRoomDbId = this.resolveRoomDatabaseId(r.roomId);
+        const matchesRoom = (String(r.roomId) === String(selectedRoomId)) || (rRoomDbId && dbRoomId && Number(rRoomDbId) === Number(dbRoomId));
         if (!matchesRoom) return false;
 
         const resStart = r.startTime ? new Date(r.startTime).getTime() : 0;
@@ -1834,9 +2010,23 @@
         return resStart && resEnd && startMs < resEnd && endMs > resStart;
       });
 
-      if (conflicting) {
+      const conflictingRpc = (this._liveRoomScheduleSlots || []).find(s => {
+        if (s.status !== 'pending' && s.status !== 'approved') return false;
+        const resStart = s.start_time ? new Date(s.start_time).getTime() : 0;
+        const resEnd = s.end_time ? new Date(s.end_time).getTime() : 0;
+        return resStart && resEnd && startMs < resEnd && endMs > resStart;
+      });
+
+      if (conflictingLocal || conflictingRpc) {
         if (conflictIndicator) {
-          conflictIndicator.textContent = `${conflicting.timeString} (${conflicting.applicantName})`;
+          if (conflictingRpc) {
+            const st = new Date(conflictingRpc.start_time);
+            const et = new Date(conflictingRpc.end_time);
+            const fTime = (d) => `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+            conflictIndicator.textContent = `${fTime(st)} - ${fTime(et)} (${conflictingRpc.event_name || 'Jadwal Ruangan'})`;
+          } else {
+            conflictIndicator.textContent = `${conflictingLocal.timeString} (${conflictingLocal.applicantName})`;
+          }
         }
         conflictBanner.classList.remove('hidden');
       } else {
@@ -2239,8 +2429,12 @@
         filtered = userBookings.filter(b => b.status === 'pending');
       } else if (currentTab === 'approved') {
         filtered = userBookings.filter(b => b.status === 'approved');
+      } else if (currentTab === 'completed') {
+        filtered = userBookings.filter(b => b.status === 'completed');
       } else if (currentTab === 'rejected') {
         filtered = userBookings.filter(b => b.status === 'rejected');
+      } else if (currentTab === 'cancelled') {
+        filtered = userBookings.filter(b => b.status === 'cancelled');
       }
 
       return `
@@ -2260,18 +2454,24 @@
             </div>
 
             <!-- Status Tabs Selector -->
-            <div class="flex items-center gap-1.5 p-1 bg-surface-container rounded-xl">
-              <button onclick="RoomBookApp.setUserHistoryTab('all')" class="flex-1 py-2 rounded-lg text-xs font-semibold transition-all ${currentTab === 'all' ? 'bg-primary text-on-primary shadow-sm' : 'text-on-surface-variant hover:text-on-surface'}">
+            <div class="flex items-center gap-1.5 p-1 bg-surface-container rounded-xl overflow-x-auto">
+              <button onclick="RoomBookApp.setUserHistoryTab('all')" class="px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${currentTab === 'all' ? 'bg-primary text-on-primary shadow-sm' : 'text-on-surface-variant hover:text-on-surface'}">
                 Semua (${userBookings.length})
               </button>
-              <button onclick="RoomBookApp.setUserHistoryTab('pending')" class="flex-1 py-2 rounded-lg text-xs font-semibold transition-all ${currentTab === 'pending' ? 'bg-primary text-on-primary shadow-sm' : 'text-on-surface-variant hover:text-on-surface'}">
+              <button onclick="RoomBookApp.setUserHistoryTab('pending')" class="px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${currentTab === 'pending' ? 'bg-primary text-on-primary shadow-sm' : 'text-on-surface-variant hover:text-on-surface'}">
                 Menunggu
               </button>
-              <button onclick="RoomBookApp.setUserHistoryTab('approved')" class="flex-1 py-2 rounded-lg text-xs font-semibold transition-all ${currentTab === 'approved' ? 'bg-primary text-on-primary shadow-sm' : 'text-on-surface-variant hover:text-on-surface'}">
+              <button onclick="RoomBookApp.setUserHistoryTab('approved')" class="px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${currentTab === 'approved' ? 'bg-primary text-on-primary shadow-sm' : 'text-on-surface-variant hover:text-on-surface'}">
                 Disetujui
               </button>
-              <button onclick="RoomBookApp.setUserHistoryTab('rejected')" class="flex-1 py-2 rounded-lg text-xs font-semibold transition-all ${currentTab === 'rejected' ? 'bg-primary text-on-primary shadow-sm' : 'text-on-surface-variant hover:text-on-surface'}">
+              <button onclick="RoomBookApp.setUserHistoryTab('completed')" class="px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${currentTab === 'completed' ? 'bg-primary text-on-primary shadow-sm' : 'text-on-surface-variant hover:text-on-surface'}">
+                Selesai
+              </button>
+              <button onclick="RoomBookApp.setUserHistoryTab('rejected')" class="px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${currentTab === 'rejected' ? 'bg-primary text-on-primary shadow-sm' : 'text-on-surface-variant hover:text-on-surface'}">
                 Ditolak
+              </button>
+              <button onclick="RoomBookApp.setUserHistoryTab('cancelled')" class="px-3 py-2 rounded-lg text-xs font-semibold whitespace-nowrap transition-all ${currentTab === 'cancelled' ? 'bg-primary text-on-primary shadow-sm' : 'text-on-surface-variant hover:text-on-surface'}">
+                Dibatalkan
               </button>
             </div>
 
@@ -2312,6 +2512,18 @@
         statusText = 'rose-700';
         statusLabel = 'Ditolak';
         statusIcon = 'cancel';
+      } else if (item.status === 'cancelled') {
+        statusColor = 'slate-400';
+        statusBg = 'slate-100';
+        statusText = 'slate-700';
+        statusLabel = 'Dibatalkan';
+        statusIcon = 'block';
+      } else if (item.status === 'completed') {
+        statusColor = 'indigo-500';
+        statusBg = 'indigo-50';
+        statusText = 'indigo-700';
+        statusLabel = 'Selesai';
+        statusIcon = 'task_alt';
       }
 
       return `
@@ -2582,6 +2794,8 @@
       const isApproved = item.status === 'approved';
       const isRejected = item.status === 'rejected';
       const isPending = item.status === 'pending';
+      const isCancelled = item.status === 'cancelled';
+      const isCompleted = item.status === 'completed';
 
       const currentUserId = RoomBookStore.currentUser?.id;
       const isAdmin = RoomBookStore.currentRole === 'admin';
@@ -2598,7 +2812,21 @@
         statusBadge = `
           <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-100 text-emerald-900 font-label-sm text-label-sm shadow-xs">
             <span class="w-2 h-2 rounded-full bg-emerald-600"></span>
-            <span class="font-semibold text-emerald-800">Telah Disetujui</span>
+            <span class="font-semibold text-emerald-800">${item.checkedInAt ? 'Check-In Berhasil' : 'Telah Disetujui'}</span>
+          </span>
+        `;
+      } else if (isCompleted) {
+        statusBadge = `
+          <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-100 text-indigo-900 font-label-sm text-label-sm shadow-xs">
+            <span class="w-2 h-2 rounded-full bg-indigo-600"></span>
+            <span class="font-semibold text-indigo-800">Selesai Digunakan</span>
+          </span>
+        `;
+      } else if (isCancelled) {
+        statusBadge = `
+          <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-200 text-slate-800 font-label-sm text-label-sm shadow-xs">
+            <span class="w-2 h-2 rounded-full bg-slate-500"></span>
+            <span class="font-semibold text-slate-700">Dibatalkan</span>
           </span>
         `;
       } else if (isRejected) {
@@ -2638,10 +2866,10 @@
                 <span class="font-label-sm text-label-sm text-on-surface-variant uppercase tracking-wider font-semibold">Tiket Reservasi Resmi</span>
               </div>
               <div class="flex items-center gap-space-xs">
-                <button aria-label="Bagikan Reservasi" onclick="RoomBookApp.showToast('Tiket #${item.id} berhasil dibagikan', 'share')" class="w-9 h-9 rounded-full bg-surface-container flex items-center justify-center text-on-surface hover:bg-surface-container-high transition-colors active:scale-95 shadow-sm" type="button">
+                <button aria-label="Bagikan Reservasi" onclick="RoomBookApp.shareReservation('${item.id}')" class="w-9 h-9 rounded-full bg-surface-container flex items-center justify-center text-on-surface hover:bg-surface-container-high transition-colors active:scale-95 shadow-sm cursor-pointer" type="button">
                   <span class="material-symbols-outlined text-[18px]">share</span>
                 </button>
-                <button aria-label="Cetak atau Simpan PDF" onclick="RoomBookApp.showToast('Mencetak tiket PDF...', 'print')" class="w-9 h-9 rounded-full bg-surface-container flex items-center justify-center text-on-surface hover:bg-surface-container-high transition-colors active:scale-95 shadow-sm" type="button">
+                <button aria-label="Cetak atau Simpan PDF" onclick="RoomBookApp.printReservation()" class="w-9 h-9 rounded-full bg-surface-container flex items-center justify-center text-on-surface hover:bg-surface-container-high transition-colors active:scale-95 shadow-sm cursor-pointer" type="button">
                   <span class="material-symbols-outlined text-[18px]">print</span>
                 </button>
               </div>
@@ -2674,7 +2902,7 @@
                   Status Verifikasi
                 </h2>
                 <span class="font-label-sm text-label-sm text-secondary bg-secondary-fixed/50 px-2 py-0.5 rounded-full font-semibold">
-                  ${isApproved ? 'Tahap 3 dari 3 (Selesai)' : isRejected ? 'Ditolak' : 'Tahap 2 dari 3'}
+                  ${isCompleted ? 'Selesai (3/3)' : isApproved ? 'Tahap 3 dari 3 (Disetujui)' : isRejected ? 'Ditolak' : isCancelled ? 'Dibatalkan' : 'Tahap 2 dari 3'}
                 </span>
               </div>
               <div class="relative flex flex-col space-y-space-md">
@@ -2696,23 +2924,23 @@
 
                 <!-- Step 2: Persetujuan Admin -->
                 <div class="flex items-start gap-space-md relative">
-                  <div class="absolute left-3.5 top-8 w-0.5 h-12 ${isApproved ? 'bg-primary' : 'bg-surface-container-highest'}"></div>
-                  <div class="w-7 h-7 rounded-full ${isApproved ? 'bg-emerald-600 text-white' : isRejected ? 'bg-error text-on-error' : 'bg-secondary-container text-on-secondary-container ring-4 ring-secondary-fixed animate-pulse'} flex items-center justify-center shrink-0 z-10 shadow-xs">
-                    <span class="material-symbols-outlined text-[16px]">${isApproved ? 'check' : isRejected ? 'close' : 'hourglass_top'}</span>
+                  <div class="absolute left-3.5 top-8 w-0.5 h-12 ${(isApproved || isCompleted) ? 'bg-primary' : 'bg-surface-container-highest'}"></div>
+                  <div class="w-7 h-7 rounded-full ${(isApproved || isCompleted) ? 'bg-emerald-600 text-white' : isRejected ? 'bg-error text-on-error' : isCancelled ? 'bg-slate-500 text-white' : 'bg-secondary-container text-on-secondary-container ring-4 ring-secondary-fixed animate-pulse'} flex items-center justify-center shrink-0 z-10 shadow-xs">
+                    <span class="material-symbols-outlined text-[16px]">${(isApproved || isCompleted) ? 'check' : isRejected ? 'close' : isCancelled ? 'block' : 'hourglass_top'}</span>
                   </div>
                   <div class="flex flex-col min-w-0 flex-1 pt-0.5">
                     <div class="flex items-center justify-between">
-                      <p class="font-label-md text-label-md ${isApproved ? 'text-emerald-800' : isRejected ? 'text-error' : 'text-primary'} font-bold">
-                        ${isApproved ? 'Disetujui oleh Admin' : isRejected ? 'Ditolak oleh Admin' : 'Menunggu Persetujuan Admin'}
+                      <p class="font-label-md text-label-md ${(isApproved || isCompleted) ? 'text-emerald-800' : isRejected ? 'text-error' : isCancelled ? 'text-slate-700' : 'text-primary'} font-bold">
+                        ${(isApproved || isCompleted) ? 'Disetujui oleh Admin' : isRejected ? 'Ditolak oleh Admin' : isCancelled ? 'Dibatalkan' : 'Menunggu Persetujuan Admin'}
                       </p>
-                      <span class="font-label-sm text-label-sm ${isApproved ? 'text-emerald-700' : isRejected ? 'text-error' : 'text-secondary'} font-medium">
-                        ${isApproved ? 'Terverifikasi' : isRejected ? 'Dibatalkan' : 'Dalam Proses'}
+                      <span class="font-label-sm text-label-sm ${(isApproved || isCompleted) ? 'text-emerald-700' : isRejected ? 'text-error' : isCancelled ? 'text-slate-600' : 'text-secondary'} font-medium">
+                        ${isCompleted ? 'Selesai' : isApproved ? 'Terverifikasi' : isRejected ? 'Ditolak' : isCancelled ? 'Batal' : 'Dalam Proses'}
                       </span>
                     </div>
                     <p class="font-body-sm text-body-sm text-on-surface-variant mt-0.5">
-                      ${isApproved ? 'Permohonan telah disetujui oleh Admin Fasilitas Kampus.' : isRejected ? `Alasan: ${item.rejectionReason}` : 'Dalam antrean verifikasi Admin Fasilitas Gedung.'}
+                      ${(isApproved || isCompleted) ? 'Permohonan telah disetujui oleh Admin Fasilitas Kampus.' : (isRejected || isCancelled) ? `Catatan: ${item.rejectionReason || 'Dibatalkan.'}` : 'Dalam antrean verifikasi Admin Fasilitas Gedung.'}
                     </p>
-                    ${!isApproved && !isRejected ? `
+                    ${isPending ? `
                       <div class="mt-space-xs inline-flex items-center gap-1 text-on-surface bg-surface-container-low px-2 py-1 rounded-lg w-fit">
                         <span class="material-symbols-outlined text-[14px] text-secondary">update</span>
                         <span class="font-label-sm text-label-sm font-medium">Estimasi respon &lt; 2 jam</span>
@@ -2723,16 +2951,33 @@
 
                 <!-- Step 3: Tiket Selesai / QR -->
                 <div class="flex items-start gap-space-md relative">
-                  <div class="w-7 h-7 rounded-full ${isApproved ? 'bg-emerald-600 text-white' : 'bg-surface-container-highest text-on-surface-variant'} flex items-center justify-center shrink-0 z-10">
-                    <span class="material-symbols-outlined text-[16px]">qr_code_2</span>
+                  <div class="w-7 h-7 rounded-full ${isCompleted ? 'bg-indigo-600 text-white' : isApproved ? 'bg-emerald-600 text-white' : 'bg-surface-container-highest text-on-surface-variant'} flex items-center justify-center shrink-0 z-10">
+                    <span class="material-symbols-outlined text-[16px]">${isCompleted ? 'task_alt' : 'qr_code_2'}</span>
                   </div>
-                  <div class="flex flex-col min-w-0 flex-1 pt-0.5 ${isApproved ? '' : 'opacity-60'}">
-                    <p class="font-label-md text-label-md text-on-surface font-semibold">${isApproved ? 'Tiket QR Aktif & Siap Digunakan' : 'Disetujui / Selesai'}</p>
+                  <div class="flex flex-col min-w-0 flex-1 pt-0.5 ${(isApproved || isCompleted) ? '' : 'opacity-60'}">
+                    <p class="font-label-md text-label-md text-on-surface font-semibold">${isCompleted ? 'Reservasi Selesai Digunakan' : isApproved ? (item.checkedInAt ? 'Check-In Berhasil • Tiket Aktif' : 'Tiket QR Aktif & Siap Digunakan') : 'Disetujui / Selesai'}</p>
                     <p class="font-body-sm text-body-sm text-on-surface-variant mt-0.5">
-                      ${isApproved ? 'Scan QR Key pada pembaca pintu ruangan untuk masuk.' : 'Akses pintu ruangan & smart QR Key akan otomatis aktif setelah diverifikasi.'}
+                      ${isCompleted ? 'Sesi penggunaan ruangan telah berakhir.' : isApproved ? 'Tunjukkan QR Ticket di bawah untuk verifikasi check-in Admin.' : 'Akses QR Ticket akan otomatis aktif setelah pengajuan disetujui.'}
                     </p>
                   </div>
                 </div>
+
+                ${Array.isArray(item.history) && item.history.length > 0 ? `
+                  <div class="pt-3 mt-1 border-t border-surface-container space-y-2">
+                    <span class="font-label-sm text-[11px] font-bold text-on-surface-variant uppercase tracking-wider">Riwayat Audit Aktivitas</span>
+                    <div class="space-y-1.5">
+                      ${item.history.map(h => `
+                        <div class="flex items-start justify-between gap-2 text-xs bg-surface-container-low px-3 py-2 rounded-lg">
+                          <div class="min-w-0">
+                            <span class="font-semibold text-on-surface block">${h.action || h.status || 'Pembaruan Status'}</span>
+                            ${h.notes ? `<span class="text-on-surface-variant block text-[11px]">${h.notes}</span>` : ''}
+                          </div>
+                          <span class="text-[11px] text-on-surface-variant shrink-0">${h.timestamp || ''}</span>
+                        </div>
+                      `).join('')}
+                    </div>
+                  </div>
+                ` : ''}
 
               </div>
             </div>
@@ -2845,6 +3090,69 @@
 
     bindDetailReservasiEvents() {},
 
+    async shareReservation(id) {
+      const item = RoomBookStore.getCachedReservationById(id);
+      const summary = item
+        ? `Tiket RoomBook #${item.id} — ${item.roomName}\nAgenda: ${item.eventName}\nWaktu: ${item.reservationDate} (${item.timeString})\nStatus: ${item.status}`
+        : `Tiket RoomBook #${id}`;
+      const shareUrl = typeof window !== 'undefined' && window.location ? window.location.href : '';
+
+      if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+        try {
+          await navigator.share({ title: `Tiket Reservasi #${id}`, text: summary, url: shareUrl });
+          this.showToast(`Tiket #${id} dibagikan`, 'share');
+          return;
+        } catch (err) {
+          if (err && err.name === 'AbortError') return;
+        }
+      }
+
+      if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        try {
+          await navigator.clipboard.writeText(`${summary}\n${shareUrl}`.trim());
+          this.showToast(`Rincian tiket #${id} disalin ke clipboard`, 'content_copy');
+          return;
+        } catch (_) {}
+      }
+      this.showToast(`Kode tiket: #${id}`, 'share');
+    },
+
+    printReservation() {
+      if (typeof window !== 'undefined' && typeof window.print === 'function') {
+        window.print();
+      } else {
+        this.showToast('Fitur cetak tersedia pada browser desktop/mobile.', 'print');
+      }
+    },
+
+    buildFallbackQrSvg(payload) {
+      let hash = 2166136261;
+      for (let i = 0; i < payload.length; i++) {
+        hash ^= payload.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      const cells = [];
+      const size = 21;
+      const isFinder = (r, c) =>
+        (r < 7 && c < 7) || (r < 7 && c >= size - 7) || (r >= size - 7 && c < 7);
+      const drawFinder = (ox, oy) => `
+        <rect x="${ox}" y="${oy}" width="7" height="7" fill="#1a146b"/>
+        <rect x="${ox + 1}" y="${oy + 1}" width="5" height="5" fill="#ffffff"/>
+        <rect x="${ox + 2}" y="${oy + 2}" width="3" height="3" fill="#1a146b"/>
+      `;
+      let seed = hash >>> 0;
+      for (let r = 0; r < size; r++) {
+        for (let c = 0; c < size; c++) {
+          if (isFinder(r, c)) continue;
+          seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+          if ((seed & 1) === 1 || ((r + c) % 5 === 0 && (seed & 2) === 2)) {
+            cells.push(`<rect x="${c}" y="${r}" width="1" height="1" fill="#1a146b"/>`);
+          }
+        }
+      }
+      return `<svg class="w-44 h-44" viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges">${drawFinder(0, 0)}${drawFinder(size - 7, 0)}${drawFinder(0, size - 7)}${cells.join('')}</svg>`;
+    },
+
     async openQRPassModal(id) {
       let item;
       try {
@@ -2857,14 +3165,38 @@
       if (!item) return;
       const modal = document.getElementById('qr-code-modal');
       const codeEl = document.getElementById('modal-qr-code');
+      const payloadEl = document.getElementById('modal-qr-payload');
+      const canvasBox = document.getElementById('modal-qr-canvas-box');
       const roomEl = document.getElementById('modal-qr-room');
       const timeEl = document.getElementById('modal-qr-time');
 
+      const qrPayload = item.qrCode || `ROOMBOOK-${item.dbId || item.id}-${item.roomId}`;
+
       if (codeEl) codeEl.textContent = `#${item.id}`;
+      if (payloadEl) payloadEl.textContent = qrPayload;
       if (roomEl) roomEl.textContent = item.roomName;
       if (timeEl) timeEl.textContent = `${item.reservationDate} (${item.timeString})`;
 
-      if (modal) {
+      if (canvasBox) {
+        canvasBox.innerHTML = '';
+        if (typeof window !== 'undefined' && typeof window.QRCode === 'function') {
+          try {
+            new window.QRCode(canvasBox, {
+              text: qrPayload,
+              width: 176,
+              height: 176,
+              colorDark: '#1a146b',
+              colorLight: '#ffffff'
+            });
+          } catch (_) {
+            canvasBox.innerHTML = this.buildFallbackQrSvg(qrPayload);
+          }
+        } else {
+          canvasBox.innerHTML = this.buildFallbackQrSvg(qrPayload);
+        }
+      }
+
+      if (modal && typeof modal.showModal === 'function') {
         modal.showModal();
       }
     },
@@ -2912,11 +3244,49 @@
     // ==========================================
     // 8. ADMIN DASHBOARD VIEW
     // ==========================================
+    computeWeeklyOccupancy() {
+      const reservations = RoomBookStore.getReservations() || [];
+      const totalRooms = Math.max(1, (RoomBookStore.getRooms() || []).length);
+      const dayLabels = ['Sen', 'Sel', 'Rab', 'Kam', 'Jum'];
+      const counts = [0, 0, 0, 0, 0];
+
+      // Hitung rentang Senin - Jumat minggu berjalan (WIB UTC+7)
+      const nowWib = new Date(Date.now() + 7 * 60 * 60 * 1000);
+      const jsDay = nowWib.getUTCDay(); // 0=Min, 1=Sen ... 6=Sab
+      const diffToMonday = jsDay === 0 ? -6 : 1 - jsDay;
+      const mondayStart = Date.UTC(nowWib.getUTCFullYear(), nowWib.getUTCMonth(), nowWib.getUTCDate() + diffToMonday) - 7 * 60 * 60 * 1000;
+      const dayMs = 24 * 60 * 60 * 1000;
+
+      reservations.forEach(r => {
+        if (r.status !== 'approved' && r.status !== 'completed') return;
+        const stMs = r.startTime ? new Date(r.startTime).getTime() : NaN;
+        if (!stMs || isNaN(stMs)) return;
+        const dayIndex = Math.floor((stMs - mondayStart) / dayMs);
+        if (dayIndex >= 0 && dayIndex < 5) {
+          counts[dayIndex] += 1;
+        }
+      });
+
+      // Normalisasi terhadap kapasitas harian dasar (asumsi 3 sesi utama/ruangan/hari)
+      const dailyCapacitySlots = Math.max(1, totalRooms * 3);
+      const bars = dayLabels.map((label, idx) => {
+        const pct = Math.min(100, Math.round((counts[idx] / dailyCapacitySlots) * 100));
+        return { label, pct, count: counts[idx] };
+      });
+      const avgPct = Math.round(bars.reduce((s, b) => s + b.pct, 0) / bars.length);
+      const peakBar = bars.reduce((best, b) => (b.pct > best.pct ? b : best), bars[0]);
+      return { bars, avgPct, peakBar };
+    },
+
     renderAdminDashboardView() {
       const pendingReservations = RoomBookStore.getPendingReservations();
       const approvedCount = RoomBookStore.getApprovedReservations().length;
       const rejectedCount = RoomBookStore.getRejectedReservations().length;
       const totalRooms = RoomBookStore.getRooms().length;
+
+      const indonesianMonths = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+      const currentMonthLabel = indonesianMonths[new Date().getMonth()];
+      const occupancy = this.computeWeeklyOccupancy();
 
       return `
         <!-- Admin Shell Header -->
@@ -2928,18 +3298,24 @@
             <!-- Admin Welcome & Header Banner -->
             <div class="relative overflow-hidden rounded-xl bg-gradient-to-br from-primary via-primary-container to-secondary p-space-md text-on-primary shadow-md">
               <div class="relative z-10 flex flex-col gap-1">
-                <div class="flex items-center gap-space-xs">
-                  <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-secondary-container/40 text-on-secondary font-label-sm text-label-sm backdrop-blur-sm">
-                    <span class="w-1.5 h-1.5 rounded-full bg-secondary-fixed animate-pulse"></span>
-                    Fasilitas &amp; Aset
-                  </span>
-                  <span class="text-primary-fixed-dim font-label-sm text-label-sm">• Sentra Operasional</span>
+                <div class="flex items-center justify-between gap-2">
+                  <div class="flex items-center gap-space-xs">
+                    <span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-secondary-container/40 text-on-secondary font-label-sm text-label-sm backdrop-blur-sm">
+                      <span class="w-1.5 h-1.5 rounded-full bg-secondary-fixed animate-pulse"></span>
+                      Fasilitas &amp; Aset
+                    </span>
+                    <span class="text-primary-fixed-dim font-label-sm text-label-sm">• Sentra Operasional</span>
+                  </div>
+                  <button onclick="RoomBookApp.openAdminCheckInModal()" type="button" class="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/15 hover:bg-white/25 text-white text-[11px] font-semibold backdrop-blur-sm transition-colors cursor-pointer">
+                    <span class="material-symbols-outlined text-[15px]">qr_code_scanner</span>
+                    <span>Check-In Tiket</span>
+                  </button>
                 </div>
                 <h1 class="font-headline-md text-headline-md tracking-tight mt-1 text-on-primary font-bold">
                   Dashboard Admin
                 </h1>
                 <p class="font-body-sm text-body-sm text-primary-fixed-dim">
-                  Kelola persetujuan &amp; ketersediaan ruangan kerja secara real-time.
+                  Kelola persetujuan, check-in tiket, &amp; ketersediaan ruangan secara real-time.
                 </p>
               </div>
               <div class="absolute -right-6 -bottom-6 w-32 h-32 rounded-full bg-secondary-container/30 blur-2xl pointer-events-none"></div>
@@ -2963,7 +3339,7 @@
                       <span class="material-symbols-outlined text-[20px]">pending_actions</span>
                     </div>
                     <span class="px-2 py-0.5 rounded-full font-label-sm text-label-sm bg-surface-container-high text-on-surface-variant font-semibold">
-                      Urgent
+                      ${pendingReservations.length > 0 ? 'Urgent' : 'Aman'}
                     </span>
                   </div>
                   <div class="mt-3">
@@ -3003,7 +3379,7 @@
                   <div class="mt-3">
                     <span class="font-headline-xl text-headline-xl text-error leading-none font-bold">${rejectedCount}</span>
                     <p class="font-label-md text-label-md text-on-surface font-semibold mt-1">Ditolak</p>
-                    <p class="font-label-sm text-label-sm text-on-surface-variant leading-tight">Bulan Oktober Ini</p>
+                    <p class="font-label-sm text-label-sm text-on-surface-variant leading-tight">Bulan ${currentMonthLabel} Ini</p>
                   </div>
                 </div>
 
@@ -3020,14 +3396,14 @@
                   <div class="mt-3">
                     <span class="font-headline-xl text-headline-xl text-primary leading-none font-bold">${totalRooms}</span>
                     <p class="font-label-md text-label-md text-on-surface font-semibold mt-1">Total Ruang</p>
-                    <p class="font-label-sm text-label-sm text-on-surface-variant leading-tight">Tambah / Hapus ruang</p>
+                    <p class="font-label-sm text-label-sm text-on-surface-variant leading-tight">Tambah / Edit / Hapus</p>
                   </div>
                 </div>
 
               </div>
             </section>
 
-            <!-- Statistik Okupansi Ruangan Mingguan -->
+            <!-- Statistik Okupansi Ruangan Mingguan (Data Aktual Store) -->
             <section class="flex flex-col gap-space-sm p-space-md rounded-xl bg-surface-container-lowest shadow-sm">
               <div class="flex items-center justify-between">
                 <div class="flex flex-col">
@@ -3035,7 +3411,7 @@
                   <h2 class="font-headline-sm text-headline-sm text-on-surface font-bold">Tingkat Okupansi Ruangan</h2>
                 </div>
                 <div class="flex flex-col items-end">
-                  <span class="font-headline-md text-headline-md text-primary font-bold">78%</span>
+                  <span class="font-headline-md text-headline-md text-primary font-bold">${occupancy.avgPct}%</span>
                   <span class="font-label-sm text-label-sm text-on-surface-variant">Rata-rata Minggu Ini</span>
                 </div>
               </div>
@@ -3043,41 +3419,19 @@
               <!-- Visual Bar Chart Minimalis -->
               <div class="pt-4 pb-2">
                 <div class="flex items-end justify-between h-36 px-2 gap-3">
-                  <div class="flex-1 flex flex-col items-center h-full justify-end group">
-                    <span class="font-label-sm text-label-sm text-on-surface-variant mb-1 group-hover:text-primary font-medium">65%</span>
-                    <div class="w-full bg-surface-container-high rounded-t-lg overflow-hidden flex flex-col justify-end h-full">
-                      <div class="w-full bg-secondary-fixed-dim rounded-t-lg transition-all duration-500" style="height: 65%;"></div>
-                    </div>
-                    <span class="font-label-sm text-label-sm text-on-surface-variant mt-2 font-medium">Sen</span>
-                  </div>
-                  <div class="flex-1 flex flex-col items-center h-full justify-end group">
-                    <span class="font-label-sm text-label-sm text-on-surface-variant mb-1 group-hover:text-primary font-medium">80%</span>
-                    <div class="w-full bg-surface-container-high rounded-t-lg overflow-hidden flex flex-col justify-end h-full">
-                      <div class="w-full bg-secondary rounded-t-lg transition-all duration-500" style="height: 80%;"></div>
-                    </div>
-                    <span class="font-label-sm text-label-sm text-on-surface-variant mt-2 font-medium">Sel</span>
-                  </div>
-                  <div class="flex-1 flex flex-col items-center h-full justify-end group">
-                    <span class="font-label-sm text-label-sm text-primary mb-1 font-bold">90%</span>
-                    <div class="w-full bg-surface-container-high rounded-t-lg overflow-hidden flex flex-col justify-end h-full">
-                      <div class="w-full bg-primary rounded-t-lg transition-all duration-500 shadow-sm" style="height: 90%;"></div>
-                    </div>
-                    <span class="font-label-sm text-label-sm text-primary mt-2 font-bold">Rab</span>
-                  </div>
-                  <div class="flex-1 flex flex-col items-center h-full justify-end group">
-                    <span class="font-label-sm text-label-sm text-on-surface-variant mb-1 group-hover:text-primary font-medium">85%</span>
-                    <div class="w-full bg-surface-container-high rounded-t-lg overflow-hidden flex flex-col justify-end h-full">
-                      <div class="w-full bg-secondary rounded-t-lg transition-all duration-500" style="height: 85%;"></div>
-                    </div>
-                    <span class="font-label-sm text-label-sm text-on-surface-variant mt-2 font-medium">Kam</span>
-                  </div>
-                  <div class="flex-1 flex flex-col items-center h-full justify-end group">
-                    <span class="font-label-sm text-label-sm text-on-surface-variant mb-1 group-hover:text-primary font-medium">70%</span>
-                    <div class="w-full bg-surface-container-high rounded-t-lg overflow-hidden flex flex-col justify-end h-full">
-                      <div class="w-full bg-secondary-fixed-dim rounded-t-lg transition-all duration-500" style="height: 70%;"></div>
-                    </div>
-                    <span class="font-label-sm text-label-sm text-on-surface-variant mt-2 font-medium">Jum</span>
-                  </div>
+                  ${occupancy.bars.map(b => {
+                    const isPeak = occupancy.peakBar && b.label === occupancy.peakBar.label && b.pct > 0;
+                    const barHeight = b.pct > 0 ? Math.max(8, b.pct) : 4;
+                    return `
+                      <div class="flex-1 flex flex-col items-center h-full justify-end group">
+                        <span class="font-label-sm text-label-sm ${isPeak ? 'text-primary font-bold' : 'text-on-surface-variant font-medium'} mb-1">${b.pct}%</span>
+                        <div class="w-full bg-surface-container-high rounded-t-lg overflow-hidden flex flex-col justify-end h-full">
+                          <div class="w-full ${isPeak ? 'bg-primary shadow-sm' : b.pct > 0 ? 'bg-secondary' : 'bg-outline-variant/40'} rounded-t-lg transition-all duration-500" style="height: ${barHeight}%;"></div>
+                        </div>
+                        <span class="font-label-sm text-label-sm ${isPeak ? 'text-primary font-bold' : 'text-on-surface-variant font-medium'} mt-2">${b.label}</span>
+                      </div>
+                    `;
+                  }).join('')}
                 </div>
               </div>
 
@@ -3085,7 +3439,9 @@
               <div class="flex items-center gap-space-xs p-2.5 rounded-lg bg-surface-container-low text-on-surface-variant">
                 <span class="material-symbols-outlined text-[18px] text-secondary">insights</span>
                 <p class="font-body-sm text-body-sm leading-tight">
-                  Puncak pemakaian tertinggi berada di <strong class="text-primary font-semibold">Rabu (90%)</strong> pada jam 10:00 - 14:00 WIB.
+                  ${occupancy.peakBar && occupancy.peakBar.count > 0
+                    ? `Puncak pemakaian minggu ini pada <strong class="text-primary font-semibold">${occupancy.peakBar.label} (${occupancy.peakBar.pct}%)</strong> dengan ${occupancy.peakBar.count} reservasi disetujui/selesai.`
+                    : 'Belum ada jadwal terpakai yang disetujui pada minggu kerja berjalan.'}
                 </p>
               </div>
             </section>
@@ -3204,11 +3560,17 @@
       } else if (currentTab === 'approved') {
         filtered = allReservations.filter(r => r.status === 'approved');
       } else if (currentTab === 'rejected') {
-        filtered = allReservations.filter(r => r.status === 'rejected');
+        filtered = allReservations.filter(r => r.status === 'rejected' || r.status === 'cancelled');
+      } else if (currentTab === 'completed') {
+        filtered = allReservations.filter(r => r.status === 'completed');
       }
 
       const pendingCount = RoomBookStore.getPendingReservations().length;
-      const hasConflict = filtered.some(r => r.hasConflict && r.status === 'pending');
+      const completedCount = allReservations.filter(r => r.status === 'completed').length;
+      const rejectedOrCancelledCount = allReservations.filter(r => r.status === 'rejected' || r.status === 'cancelled').length;
+      const conflictingItems = filtered.filter(r => r.hasConflict && r.status === 'pending');
+      const hasConflict = conflictingItems.length > 0;
+      const conflictSummaryRoom = hasConflict ? conflictingItems.map(c => c.roomName).filter((v, i, a) => a.indexOf(v) === i).join(', ') : '';
 
       return `
         <!-- Admin Shell Header -->
@@ -3230,15 +3592,18 @@
             </section>
 
             <!-- Filter Status Tabs -->
-            <section class="flex items-center gap-space-xs p-1 bg-surface-container rounded-xl">
-              <button onclick="RoomBookApp.setAdminApprovalTab('pending')" class="flex-1 py-2 rounded-lg ${currentTab === 'pending' ? 'bg-primary text-on-primary shadow-sm font-bold' : 'text-on-surface-variant hover:text-on-surface'} font-label-md text-label-md text-center transition-all" type="button">
+            <section class="flex items-center gap-space-xs p-1 bg-surface-container rounded-xl overflow-x-auto">
+              <button onclick="RoomBookApp.setAdminApprovalTab('pending')" class="px-3 py-2 rounded-lg whitespace-nowrap ${currentTab === 'pending' ? 'bg-primary text-on-primary shadow-sm font-bold' : 'text-on-surface-variant hover:text-on-surface'} font-label-md text-label-md text-center transition-all" type="button">
                 Pending (${pendingCount})
               </button>
-              <button onclick="RoomBookApp.setAdminApprovalTab('approved')" class="flex-1 py-2 rounded-lg ${currentTab === 'approved' ? 'bg-primary text-on-primary shadow-sm font-bold' : 'text-on-surface-variant hover:text-on-surface'} font-label-md text-label-md text-center transition-all" type="button">
+              <button onclick="RoomBookApp.setAdminApprovalTab('approved')" class="px-3 py-2 rounded-lg whitespace-nowrap ${currentTab === 'approved' ? 'bg-primary text-on-primary shadow-sm font-bold' : 'text-on-surface-variant hover:text-on-surface'} font-label-md text-label-md text-center transition-all" type="button">
                 Disetujui (${RoomBookStore.getApprovedReservations().length})
               </button>
-              <button onclick="RoomBookApp.setAdminApprovalTab('rejected')" class="flex-1 py-2 rounded-lg ${currentTab === 'rejected' ? 'bg-primary text-on-primary shadow-sm font-bold' : 'text-on-surface-variant hover:text-on-surface'} font-label-md text-label-md text-center transition-all" type="button">
-                Ditolak (${RoomBookStore.getRejectedReservations().length})
+              <button onclick="RoomBookApp.setAdminApprovalTab('completed')" class="px-3 py-2 rounded-lg whitespace-nowrap ${currentTab === 'completed' ? 'bg-primary text-on-primary shadow-sm font-bold' : 'text-on-surface-variant hover:text-on-surface'} font-label-md text-label-md text-center transition-all" type="button">
+                Selesai (${completedCount})
+              </button>
+              <button onclick="RoomBookApp.setAdminApprovalTab('rejected')" class="px-3 py-2 rounded-lg whitespace-nowrap ${currentTab === 'rejected' ? 'bg-primary text-on-primary shadow-sm font-bold' : 'text-on-surface-variant hover:text-on-surface'} font-label-md text-label-md text-center transition-all" type="button">
+                Ditolak/Batal (${rejectedOrCancelledCount})
               </button>
             </section>
 
@@ -3249,9 +3614,9 @@
                   <span class="material-symbols-outlined text-[20px]">warning</span>
                 </div>
                 <div class="flex-1">
-                  <h2 class="font-headline-sm text-headline-sm leading-tight font-bold">Terdeteksi 1 Konflik Slot Ruangan</h2>
+                  <h2 class="font-headline-sm text-headline-sm leading-tight font-bold">Terdeteksi ${conflictingItems.length} Pengajuan Berpotensi Konflik</h2>
                   <p class="font-body-sm text-body-sm mt-1 leading-snug">
-                    Ada 2 pengajuan di <span class="font-semibold">Ruang Rapat Utama</span> pada jam yang bersinggungan (10:00 - 12:00 WIB). Tinjau sebelum menyetujui.
+                    Ruangan terkait: <span class="font-semibold">${conflictSummaryRoom}</span>. Tinjau detail jadwal sebelum menyetujui.
                   </p>
                 </div>
               </section>
@@ -3268,33 +3633,6 @@
               ` : filtered.map(item => this.renderApprovalCard(item)).join('')}
             </div>
 
-            <!-- Comparison Secondary Card for Demo Conflict -->
-            ${currentTab === 'pending' && hasConflict ? `
-              <article class="bg-surface-container-lowest rounded-xl p-space-md shadow-sm flex flex-col space-y-3">
-                <div class="flex items-start justify-between">
-                  <div class="flex items-center gap-3">
-                    <div class="w-10 h-10 rounded-full bg-tertiary-fixed text-on-tertiary-fixed flex items-center justify-center shadow-sm font-bold">
-                      SR
-                    </div>
-                    <div>
-                      <h3 class="font-headline-sm text-headline-sm text-on-surface font-bold">Siti Rahmawati</h3>
-                      <span class="font-label-sm text-label-sm text-on-surface-variant">Biro Kemahasiswaan</span>
-                    </div>
-                  </div>
-                  <span class="px-2 py-0.5 rounded-full bg-error-container text-on-error-container font-label-sm text-label-sm font-bold">
-                    Slot Bersinggungan
-                  </span>
-                </div>
-                <div class="text-body-sm font-body-sm text-on-surface-variant">
-                  Mengajukan <strong class="text-on-surface">Ruang Rapat Utama</strong> untuk Jam 10:30 - 12:30 WIB (Perekrutan Asisten Lab &amp; Pengurus).
-                </div>
-                <div class="flex items-center justify-end gap-2 pt-1">
-                  <button onclick="RoomBookApp.navigate('#admin/detail-pengajuan/RB-892')" class="px-3 py-1.5 rounded-lg bg-surface-container text-on-surface-variant font-label-sm text-label-sm hover:bg-surface-container-high transition-colors cursor-pointer" type="button">Detail Analisis Konflik</button>
-                  <button onclick="RoomBookApp.prioritizeCandidate('Siti Rahmawati', 'Ruang Rapat Utama')" class="px-3 py-1.5 rounded-lg bg-primary-fixed text-on-primary-fixed font-label-sm text-label-sm font-semibold hover:bg-primary-fixed-dim transition-colors cursor-pointer" type="button">Prioritaskan</button>
-                </div>
-              </article>
-            ` : ''}
-
           </div>
         </main>
 
@@ -3307,6 +3645,8 @@
       const isPending = item.status === 'pending';
       const isApproved = item.status === 'approved';
       const isRejected = item.status === 'rejected';
+      const isCancelled = item.status === 'cancelled';
+      const isCompleted = item.status === 'completed';
 
       return `
         <article class="bg-surface-container-lowest rounded-xl shadow-sm overflow-hidden flex flex-col">
@@ -3326,6 +3666,14 @@
               ` : isApproved ? `
                 <span class="px-2.5 py-1 rounded-full bg-emerald-600 text-white font-label-sm text-label-sm flex items-center gap-1 shadow-sm font-semibold">
                   <span class="material-symbols-outlined text-[14px]">check</span> Disetujui
+                </span>
+              ` : isCompleted ? `
+                <span class="px-2.5 py-1 rounded-full bg-indigo-600 text-white font-label-sm text-label-sm flex items-center gap-1 shadow-sm font-semibold">
+                  <span class="material-symbols-outlined text-[14px]">task_alt</span> Selesai
+                </span>
+              ` : isCancelled ? `
+                <span class="px-2.5 py-1 rounded-full bg-slate-600 text-white font-label-sm text-label-sm flex items-center gap-1 shadow-sm font-semibold">
+                  <span class="material-symbols-outlined text-[14px]">block</span> Dibatalkan
                 </span>
               ` : isRejected ? `
                 <span class="px-2.5 py-1 rounded-full bg-rose-600 text-white font-label-sm text-label-sm flex items-center gap-1 shadow-sm font-semibold">
@@ -3823,21 +4171,42 @@
     // ==========================================
     renderAdminTambahRuanganView() {
       const rooms = [...RoomBookStore.getRooms()].sort((a, b) => Number(b.dbId || 0) - Number(a.dbId || 0));
-      const previewUrl = this._pendingRoomPhotoPreview || '';
+      const editingRoom = this._editingRoomId ? RoomBookStore.getRoomById(this._editingRoomId) : null;
+      const isEditing = Boolean(editingRoom);
+
+      const previewUrl = this._pendingRoomPhotoPreview || (editingRoom ? (editingRoom.image || editingRoom.thumbnail || '') : '');
       const fileName = this._pendingRoomPhotoFile ? this._pendingRoomPhotoFile.name : '';
       const fileSizeKb = this._pendingRoomPhotoFile ? Math.max(1, Math.round(this._pendingRoomPhotoFile.size / 1024)) : 0;
 
-      const defaultFacilities = [
-        { label: 'AC Central', icon: 'ac_unit', checked: true },
-        { label: 'WiFi High-Speed', icon: 'wifi', checked: true },
-        { label: 'Proyektor & Layar', icon: 'videocam', checked: true },
-        { label: 'Smart Display TV', icon: 'tv', checked: false },
-        { label: 'Sound System & Mic', icon: 'mic', checked: false },
-        { label: 'Whiteboard & Spidol', icon: 'draw', checked: false }
+      const existingFacNames = editingRoom
+        ? (editingRoom.facilities || []).map(f => (typeof f === 'string' ? f : f.name)).filter(Boolean)
+        : null;
+
+      const baseFacilityTemplates = [
+        { label: 'AC Central', icon: 'ac_unit', defaultChecked: true },
+        { label: 'WiFi High-Speed', icon: 'wifi', defaultChecked: true },
+        { label: 'Proyektor & Layar', icon: 'videocam', defaultChecked: true },
+        { label: 'Smart Display TV', icon: 'tv', defaultChecked: false },
+        { label: 'Sound System & Mic', icon: 'mic', defaultChecked: false },
+        { label: 'Whiteboard & Spidol', icon: 'draw', defaultChecked: false }
       ];
+      const baseLabels = baseFacilityTemplates.map(f => f.label);
+      const defaultFacilities = baseFacilityTemplates.map(f => ({
+        label: f.label,
+        icon: f.icon,
+        checked: existingFacNames ? existingFacNames.includes(f.label) : f.defaultChecked
+      }));
+      const checkedDefaultCount = defaultFacilities.filter(f => f.checked).length;
+      const extraCustomFacilities = existingFacNames
+        ? existingFacNames.filter(name => !baseLabels.includes(name)).join(', ')
+        : '';
+
+      const valName = editingRoom ? (editingRoom.name || '') : '';
+      const valFloor = editingRoom ? (editingRoom.floor || 'Lantai 1') : 'Lantai 1';
+      const valCapacity = editingRoom ? (editingRoom.capacity || 20) : 20;
 
       return `
-        ${this.renderAdminHeader('Tambah Ruangan')}
+        ${this.renderAdminHeader(isEditing ? 'Edit Ruangan' : 'Tambah Ruangan')}
 
         <main class="flex-1 flex flex-col relative w-full pt-16 pb-24 bg-surface px-margin">
           <div class="flex flex-col w-full gap-space-md pb-8 pt-2">
@@ -3845,28 +4214,35 @@
             <!-- Header Banner -->
             <div class="relative overflow-hidden rounded-2xl bg-gradient-to-br from-primary via-primary-container to-secondary p-space-md text-on-primary shadow-md">
               <div class="relative z-10 flex flex-col gap-1">
-                <span class="inline-flex items-center gap-1.5 self-start px-2.5 py-0.5 rounded-full bg-white/15 text-on-primary font-label-sm text-label-sm backdrop-blur-sm">
-                  <span class="material-symbols-outlined text-[15px]">add_business</span>
-                  Manajemen Fasilitas
-                </span>
+                <div class="flex items-center justify-between gap-2">
+                  <span class="inline-flex items-center gap-1.5 self-start px-2.5 py-0.5 rounded-full bg-white/15 text-on-primary font-label-sm text-label-sm backdrop-blur-sm">
+                    <span class="material-symbols-outlined text-[15px]">${isEditing ? 'edit_square' : 'add_business'}</span>
+                    Manajemen Fasilitas
+                  </span>
+                  ${isEditing ? `
+                    <button type="button" onclick="RoomBookApp.cancelAdminEditRoom()" class="px-2.5 py-1 rounded-lg bg-white/20 hover:bg-white/30 text-white text-[11px] font-semibold cursor-pointer">
+                      Batal Edit
+                    </button>
+                  ` : ''}
+                </div>
                 <h1 class="font-headline-md text-headline-md tracking-tight mt-1 text-on-primary font-bold">
-                  Tambah Ruangan Baru
+                  ${isEditing ? `Edit Ruangan: ${editingRoom.name}` : 'Tambah Ruangan Baru'}
                 </h1>
                 <p class="font-body-sm text-body-sm text-primary-fixed-dim">
-                  Upload foto ruangan &amp; lengkapi detail agar langsung bisa dibooking oleh pengguna.
+                  ${isEditing ? 'Perbarui detail ruangan. Biarkan foto tidak berubah jika ingin mempertahankan foto lama.' : 'Upload foto ruangan & lengkapi detail agar langsung bisa dibooking oleh pengguna.'}
                 </p>
               </div>
               <div class="absolute -right-6 -bottom-6 w-28 h-28 rounded-full bg-secondary-container/30 blur-2xl pointer-events-none"></div>
             </div>
 
-            <!-- Form Tambah Ruangan -->
+            <!-- Form Tambah / Edit Ruangan -->
             <form id="admin-add-room-form" class="flex flex-col gap-space-md" onsubmit="event.preventDefault(); RoomBookApp.handleAdminAddRoomSubmit();">
 
               <!-- Upload Foto Ruangan (Tanpa Input URL) -->
               <div class="bg-surface-container-lowest rounded-2xl p-space-md shadow-sm flex flex-col gap-3">
                 <div class="flex items-center justify-between">
                   <label class="font-headline-sm text-headline-sm text-on-surface font-bold">Foto Ruangan</label>
-                  <span class="font-label-sm text-label-sm text-secondary font-medium">Wajib Upload Foto</span>
+                  <span class="font-label-sm text-label-sm text-secondary font-medium">${isEditing ? 'Opsional (Ganti Foto)' : 'Wajib Upload Foto'}</span>
                 </div>
 
                 <input type="file" id="admin-room-photo-input" accept="image/*" class="hidden" onchange="RoomBookApp.handleAdminRoomPhotoSelect(this)" />
@@ -3888,8 +4264,8 @@
                   <div class="relative w-full h-48 rounded-xl overflow-hidden bg-surface-container border border-outline-variant/30">
                     <img id="admin-room-photo-preview" src="${previewUrl}" alt="Preview Foto Ruangan" class="w-full h-full object-cover" />
                     <div class="absolute bottom-2 left-2 right-2 flex items-center justify-between bg-black/60 backdrop-blur-sm text-white px-3 py-1.5 rounded-lg text-[11px]">
-                      <span id="admin-room-photo-meta" class="truncate font-medium">${fileName ? `${fileName} (${fileSizeKb} KB)` : 'Foto siap diupload'}</span>
-                      <span class="text-emerald-300 font-semibold shrink-0 ml-2">Siap Upload</span>
+                      <span id="admin-room-photo-meta" class="truncate font-medium">${fileName ? `${fileName} (${fileSizeKb} KB)` : (isEditing ? 'Foto tersimpan saat ini' : 'Foto siap diupload')}</span>
+                      <span class="text-emerald-300 font-semibold shrink-0 ml-2">${fileName ? 'Siap Upload' : 'Foto Aktif'}</span>
                     </div>
                   </div>
                   <div class="flex items-center gap-2">
@@ -3911,7 +4287,7 @@
                   <label class="font-label-sm text-label-sm text-on-surface-variant font-semibold" for="admin-room-name">Nama Ruangan</label>
                   <div class="relative flex items-center">
                     <span class="material-symbols-outlined absolute left-3 text-outline text-[20px] pointer-events-none">meeting_room</span>
-                    <input id="admin-room-name" type="text" placeholder="Contoh: Ruang Rapat Anggrek" required class="w-full bg-surface-container-low text-on-surface font-body-md text-body-md pl-10 pr-4 py-3 rounded-xl focus:outline-none focus:bg-surface-container transition-colors" />
+                    <input id="admin-room-name" type="text" value="${valName}" placeholder="Contoh: Ruang Rapat Anggrek" required class="w-full bg-surface-container-low text-on-surface font-body-md text-body-md pl-10 pr-4 py-3 rounded-xl focus:outline-none focus:bg-surface-container transition-colors" />
                   </div>
                 </div>
 
@@ -3919,7 +4295,7 @@
                   <label class="font-label-sm text-label-sm text-on-surface-variant font-semibold" for="admin-room-floor">Lokasi / Lantai Gedung</label>
                   <div class="relative flex items-center">
                     <span class="material-symbols-outlined absolute left-3 text-outline text-[20px] pointer-events-none">location_on</span>
-                    <input id="admin-room-floor" type="text" placeholder="Contoh: Lantai 2 • Sayap Timur" value="Lantai 1" required class="w-full bg-surface-container-low text-on-surface font-body-md text-body-md pl-10 pr-4 py-3 rounded-xl focus:outline-none focus:bg-surface-container transition-colors" />
+                    <input id="admin-room-floor" type="text" placeholder="Contoh: Lantai 2 • Sayap Timur" value="${valFloor}" required class="w-full bg-surface-container-low text-on-surface font-body-md text-body-md pl-10 pr-4 py-3 rounded-xl focus:outline-none focus:bg-surface-container transition-colors" />
                   </div>
                 </div>
               </div>
@@ -3932,7 +4308,7 @@
                 </div>
                 <div class="relative flex items-center">
                   <span class="material-symbols-outlined absolute left-3 text-outline text-[20px] pointer-events-none">groups</span>
-                  <input id="admin-room-capacity" type="number" min="1" max="1000" value="20" required class="w-full bg-surface-container-low text-on-surface font-headline-sm text-headline-sm font-bold pl-10 pr-4 py-3 rounded-xl focus:outline-none focus:bg-surface-container transition-colors" />
+                  <input id="admin-room-capacity" type="number" min="1" max="1000" value="${valCapacity}" required class="w-full bg-surface-container-low text-on-surface font-headline-sm text-headline-sm font-bold pl-10 pr-4 py-3 rounded-xl focus:outline-none focus:bg-surface-container transition-colors" />
                 </div>
                 <div class="flex flex-wrap gap-1.5 pt-1">
                   ${[8, 15, 20, 40, 80].map(preset => `
@@ -3947,7 +4323,7 @@
               <div class="bg-surface-container-lowest rounded-2xl p-space-md shadow-sm flex flex-col gap-3">
                 <div class="flex items-center justify-between">
                   <span class="font-label-sm text-label-sm text-on-surface-variant font-semibold">Fasilitas Tersedia</span>
-                  <span id="admin-room-fac-count" class="font-label-sm text-label-sm text-secondary font-medium">3 Terpilih</span>
+                  <span id="admin-room-fac-count" class="font-label-sm text-label-sm text-secondary font-medium">${checkedDefaultCount} Terpilih</span>
                 </div>
                 <div class="flex flex-col gap-2" id="admin-room-facility-chips">
                   ${defaultFacilities.map(f => `
@@ -3963,15 +4339,22 @@
                 </div>
                 <div class="flex flex-col gap-1 pt-1">
                   <label class="font-label-sm text-label-sm text-on-surface-variant" for="admin-room-custom-facilities">Fasilitas Tambahan Lain (Opsional)</label>
-                  <input id="admin-room-custom-facilities" type="text" placeholder="Contoh: Podium, Coffee Station (pisahkan koma)" class="w-full bg-surface-container-low text-on-surface font-body-sm text-body-sm px-3.5 py-2.5 rounded-xl focus:outline-none focus:bg-surface-container transition-colors" />
+                  <input id="admin-room-custom-facilities" type="text" value="${extraCustomFacilities}" placeholder="Contoh: Podium, Coffee Station (pisahkan koma)" class="w-full bg-surface-container-low text-on-surface font-body-sm text-body-sm px-3.5 py-2.5 rounded-xl focus:outline-none focus:bg-surface-container transition-colors" />
                 </div>
               </div>
 
               <!-- Submit Button -->
-              <button id="btn-submit-new-room" type="submit" class="w-full py-3.5 px-6 rounded-xl bg-primary hover:bg-primary-container text-on-primary font-headline-sm text-headline-sm shadow-lg flex items-center justify-center gap-2 transition-transform active:scale-[0.98] cursor-pointer">
-                <span class="material-symbols-outlined text-[22px]">add_circle</span>
-                <span>Simpan &amp; Tambah Ruangan</span>
-              </button>
+              <div class="flex gap-2">
+                ${isEditing ? `
+                  <button type="button" onclick="RoomBookApp.cancelAdminEditRoom()" class="px-4 py-3.5 rounded-xl bg-surface-container text-on-surface font-headline-sm text-sm font-semibold hover:bg-surface-container-high transition-colors cursor-pointer">
+                    Batal
+                  </button>
+                ` : ''}
+                <button id="btn-submit-new-room" type="submit" class="flex-1 py-3.5 px-6 rounded-xl bg-primary hover:bg-primary-container text-on-primary font-headline-sm text-headline-sm shadow-lg flex items-center justify-center gap-2 transition-transform active:scale-[0.98] cursor-pointer">
+                  <span class="material-symbols-outlined text-[22px]">${isEditing ? 'save' : 'add_circle'}</span>
+                  <span>${isEditing ? 'Simpan Perubahan Ruangan' : 'Simpan & Tambah Ruangan'}</span>
+                </button>
+              </div>
             </form>
 
             <!-- Daftar Ruangan Aktif Saat Ini -->
@@ -3993,10 +4376,16 @@
                       <p class="font-headline-sm text-on-surface font-bold truncate">${r.name}</p>
                       <p class="font-body-sm text-on-surface-variant truncate">${r.floor} • Kapasitas ${r.capacity} Orang</p>
                     </div>
-                    <button type="button" onclick="RoomBookApp.openDeleteRoomModal('${r.id}')" class="px-2.5 py-1.5 rounded-lg bg-error-container text-on-error-container hover:bg-error hover:text-on-error font-label-sm text-[11px] font-semibold flex items-center gap-1 shrink-0 transition-colors cursor-pointer" title="Hapus ruangan ini">
-                      <span class="material-symbols-outlined text-[16px]">delete</span>
-                      <span>Hapus</span>
-                    </button>
+                    <div class="flex items-center gap-1.5 shrink-0">
+                      <button type="button" onclick="RoomBookApp.startEditRoom('${r.id}')" class="px-2.5 py-1.5 rounded-lg bg-primary-fixed text-on-primary-fixed hover:bg-primary hover:text-on-primary font-label-sm text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer" title="Edit ruangan ini">
+                        <span class="material-symbols-outlined text-[15px]">edit</span>
+                        <span>Edit</span>
+                      </button>
+                      <button type="button" onclick="RoomBookApp.openDeleteRoomModal('${r.id}')" class="px-2.5 py-1.5 rounded-lg bg-error-container text-on-error-container hover:bg-error hover:text-on-error font-label-sm text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer" title="Hapus ruangan ini">
+                        <span class="material-symbols-outlined text-[15px]">delete</span>
+                        <span>Hapus</span>
+                      </button>
+                    </div>
                   </div>
                 `).join('')}
               </div>
@@ -4092,6 +4481,28 @@
       }
     },
 
+    startEditRoom(roomId) {
+      const room = RoomBookStore.getRoomById(roomId);
+      if (!room) {
+        this.showToast('Data ruangan tidak ditemukan.', 'warning');
+        return;
+      }
+      this._editingRoomId = room.id;
+      this._pendingRoomPhotoFile = null;
+      this._pendingRoomPhotoPreview = room.image || room.thumbnail || null;
+      this.render();
+      if (typeof window !== 'undefined' && typeof window.scrollTo === 'function') {
+        window.scrollTo(0, 0);
+      }
+    },
+
+    cancelAdminEditRoom() {
+      this._editingRoomId = null;
+      this._pendingRoomPhotoFile = null;
+      this._pendingRoomPhotoPreview = null;
+      this.render();
+    },
+
     async handleAdminAddRoomSubmit() {
       const name = document.getElementById('admin-room-name')?.value?.trim() || '';
       const floor = document.getElementById('admin-room-floor')?.value?.trim() || '';
@@ -4099,7 +4510,10 @@
       const capacity = parseInt(capRaw, 10);
       const customFacRaw = document.getElementById('admin-room-custom-facilities')?.value || '';
 
-      if (!this._pendingRoomPhotoFile) {
+      const editingRoom = this._editingRoomId ? RoomBookStore.getRoomById(this._editingRoomId) : null;
+      const isEditing = Boolean(editingRoom);
+
+      if (!isEditing && !this._pendingRoomPhotoFile) {
         this.showToast('Silakan upload foto ruangan terlebih dahulu.', 'add_a_photo');
         return;
       }
@@ -4137,29 +4551,44 @@
       const originalHtml = btn ? btn.innerHTML : '';
       if (btn) {
         btn.disabled = true;
-        btn.innerHTML = `<span class="material-symbols-outlined animate-spin text-[20px]">progress_activity</span><span>Mengupload Foto &amp; Menyimpan...</span>`;
+        btn.innerHTML = `<span class="material-symbols-outlined animate-spin text-[20px]">progress_activity</span><span>${isEditing ? 'Menyimpan Perubahan...' : 'Mengupload Foto & Menyimpan...'}</span>`;
       }
 
       try {
-        const result = await RoomBookStore.createRoomSupabase({
-          name,
-          capacity,
-          floor,
-          facilities,
-          imageFile: this._pendingRoomPhotoFile
-        });
+        let result;
+        if (isEditing) {
+          result = await RoomBookStore.updateRoomSupabase({
+            roomId: editingRoom.dbId || editingRoom.id,
+            name,
+            capacity,
+            floor,
+            facilities,
+            imageFile: this._pendingRoomPhotoFile || null
+          });
+          this._editingRoomId = null;
+          this._pendingRoomPhotoFile = null;
+          this._pendingRoomPhotoPreview = null;
+          this.showToast(`Perubahan ruangan "${name}" berhasil disimpan!`, 'check_circle');
+        } else {
+          result = await RoomBookStore.createRoomSupabase({
+            name,
+            capacity,
+            floor,
+            facilities,
+            imageFile: this._pendingRoomPhotoFile
+          });
+          this._pendingRoomPhotoFile = null;
+          this._pendingRoomPhotoPreview = null;
+          this.showToast(`Ruangan "${name}" berhasil ditambahkan dan langsung tersedia untuk user!`, 'check_circle');
+        }
 
-        this._pendingRoomPhotoFile = null;
-        this._pendingRoomPhotoPreview = null;
-
-        this.showToast(`Ruangan "${name}" berhasil ditambahkan dan langsung tersedia untuk user!`, 'check_circle');
         if (result && result.storageMode === 'embedded') {
           console.log('ℹ️ [RoomBookApp] Foto disimpan dalam format terkompresi.');
         }
         this.render();
       } catch (err) {
-        console.error('❌ Gagal menambah ruangan:', err);
-        this.showToast(this.formatRpcError(err, 'menambah ruangan'), 'error');
+        console.error(isEditing ? '❌ Gagal memperbarui ruangan:' : '❌ Gagal menambah ruangan:', err);
+        this.showToast(this.formatRpcError(err, isEditing ? 'memperbarui ruangan' : 'menambah ruangan'), 'error');
         if (btn) {
           btn.disabled = false;
           btn.innerHTML = originalHtml;
@@ -4227,11 +4656,143 @@
       }
     },
 
+    openForgotPasswordModal() {
+      const modal = document.getElementById('forgot-password-modal');
+      const input = document.getElementById('forgot-password-email');
+      const loginEmail = document.getElementById('login-identifier')?.value?.trim() || '';
+      if (input && loginEmail) input.value = loginEmail;
+      if (modal && typeof modal.showModal === 'function') {
+        modal.showModal();
+      } else {
+        this.showToast('Masukkan email Anda untuk mengirim tautan reset sandi.', 'mail');
+      }
+    },
+
+    async executeForgotPassword() {
+      const modal = document.getElementById('forgot-password-modal');
+      const input = document.getElementById('forgot-password-email');
+      const btn = document.getElementById('btn-submit-forgot-pwd');
+      const email = input?.value?.trim() || '';
+      if (!email) {
+        this.showToast('Email wajib diisi.', 'warning');
+        return;
+      }
+      if (!window.AuthService || typeof window.AuthService.resetPassword !== 'function') {
+        this.showToast('Layanan AuthService belum siap.', 'error');
+        return;
+      }
+      const orig = btn ? btn.textContent : 'Kirim Tautan';
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Mengirim...';
+      }
+      try {
+        const res = await window.AuthService.resetPassword(email);
+        if (modal && typeof modal.close === 'function') modal.close();
+        this.showToast(res.message, res.success ? 'mark_email_read' : 'error');
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = orig;
+        }
+      }
+    },
+
+    openAdminCheckInModal() {
+      const modal = document.getElementById('admin-checkin-modal');
+      const resInput = document.getElementById('checkin-res-id-input');
+      const qrInput = document.getElementById('checkin-qr-code-input');
+      if (resInput) resInput.value = '';
+      if (qrInput) qrInput.value = '';
+      if (modal && typeof modal.showModal === 'function') {
+        modal.showModal();
+      }
+    },
+
+    async executeAdminCheckIn() {
+      const modal = document.getElementById('admin-checkin-modal');
+      const resInput = document.getElementById('checkin-res-id-input')?.value?.trim() || '';
+      const qrInput = document.getElementById('checkin-qr-code-input')?.value?.trim() || null;
+      const btn = document.getElementById('btn-submit-admin-checkin');
+
+      if (!resInput) {
+        this.showToast('Masukkan ID Reservasi atau Kode QR tiket.', 'warning');
+        return;
+      }
+
+      const orig = btn ? btn.textContent : 'Konfirmasi Check-In';
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Memverifikasi...';
+      }
+
+      try {
+        await RoomBookStore.checkInReservationSupabase(resInput, qrInput);
+        if (modal && typeof modal.close === 'function') modal.close();
+        this.showToast('Check-in tiket berhasil terverifikasi di database!', 'verified');
+        this.render();
+      } catch (err) {
+        this.showToast(this.formatRpcError(err, 'memproses check-in tiket'), 'error');
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = orig;
+        }
+      }
+    },
+
+    openEditProfileModal() {
+      const modal = document.getElementById('edit-profile-modal');
+      const input = document.getElementById('edit-profile-name-input');
+      if (input) input.value = RoomBookStore.currentUser?.name || '';
+      if (modal && typeof modal.showModal === 'function') {
+        modal.showModal();
+      }
+    },
+
+    async executeEditProfileName() {
+      const modal = document.getElementById('edit-profile-modal');
+      const newName = document.getElementById('edit-profile-name-input')?.value?.trim() || '';
+      const btn = document.getElementById('btn-submit-edit-profile');
+      if (!newName || newName.length < 2) {
+        this.showToast('Nama lengkap minimal 2 karakter.', 'warning');
+        return;
+      }
+      if (!window.AuthService || typeof window.AuthService.updateProfileName !== 'function') {
+        this.showToast('Layanan AuthService belum tersedia.', 'error');
+        return;
+      }
+
+      const orig = btn ? btn.textContent : 'Simpan Nama';
+      if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Menyimpan...';
+      }
+      try {
+        const res = await window.AuthService.updateProfileName(newName);
+        if (res.success) {
+          if (modal && typeof modal.close === 'function') modal.close();
+          this.showToast(res.message, 'check_circle');
+          this.render();
+        } else {
+          this.showToast(res.message, 'error');
+        }
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = orig;
+        }
+      }
+    },
+
     // ==========================================
     // 11. PROFILE VIEW
     // ==========================================
     renderProfilView() {
       const isAdmin = RoomBookStore.currentRole === 'admin';
+      const hasAdminPrivilege = typeof window !== 'undefined' && window.AuthService && typeof window.AuthService.isAdmin === 'function'
+        ? window.AuthService.isAdmin()
+        : isAdmin;
       const currentUser = RoomBookStore.currentUser || {};
       const userName = currentUser.name || (isAdmin ? 'Admin Fasilitas & IT' : 'Pengguna Ruangan');
       const userEmail = currentUser.email || 'belum_login@kampus.ac.id';
@@ -4261,31 +4822,33 @@
               </span>
             </div>
 
-            <!-- Settings & Role Switch Option -->
+            <!-- Settings & Account Option -->
             <div class="bg-surface-container-lowest p-4 rounded-2xl shadow-sm flex flex-col gap-2">
               <span class="text-xs font-bold text-on-surface-variant uppercase tracking-wider">Pengaturan Akun &amp; Sesi</span>
 
-              <button onclick="RoomBookApp.switchRole('${isAdmin ? 'user' : 'admin'}')" class="w-full p-3 rounded-xl bg-surface-container-low hover:bg-surface-container flex items-center justify-between text-left transition-colors cursor-pointer">
+              <button onclick="RoomBookApp.openEditProfileModal()" class="w-full p-3 rounded-xl bg-surface-container-low hover:bg-surface-container flex items-center justify-between text-left transition-colors cursor-pointer">
                 <div class="flex items-center gap-3">
-                  <span class="material-symbols-outlined text-primary text-xl">${isAdmin ? 'person' : 'shield'}</span>
+                  <span class="material-symbols-outlined text-primary text-xl">edit</span>
                   <div>
-                    <span class="font-semibold text-xs text-on-surface block">Ganti Portal Tampilan</span>
-                    <span class="text-[11px] text-on-surface-variant">Beralih ke mode ${isAdmin ? 'User' : 'Admin'} (Memerlukan hak admin di DB)</span>
+                    <span class="font-semibold text-xs text-on-surface block">Ubah Nama Profil</span>
+                    <span class="text-[11px] text-on-surface-variant">Perbarui nama lengkap Anda di database</span>
                   </div>
                 </div>
                 <span class="material-symbols-outlined text-sm text-outline">chevron_right</span>
               </button>
 
-              <button onclick="RoomBookApp.resetDataDemo()" class="w-full p-3 rounded-xl bg-surface-container-low hover:bg-surface-container flex items-center justify-between text-left transition-colors cursor-pointer">
-                <div class="flex items-center gap-3">
-                  <span class="material-symbols-outlined text-secondary text-xl">restart_alt</span>
-                  <div>
-                    <span class="font-semibold text-xs text-on-surface block">Kembalikan Data Awal Demo</span>
-                    <span class="text-[11px] text-on-surface-variant">Reset reservasi dan status simulasi</span>
+              ${hasAdminPrivilege ? `
+                <button onclick="RoomBookApp.switchRole('${isAdmin ? 'user' : 'admin'}')" class="w-full p-3 rounded-xl bg-surface-container-low hover:bg-surface-container flex items-center justify-between text-left transition-colors cursor-pointer">
+                  <div class="flex items-center gap-3">
+                    <span class="material-symbols-outlined text-primary text-xl">${isAdmin ? 'person' : 'shield'}</span>
+                    <div>
+                      <span class="font-semibold text-xs text-on-surface block">Ganti Portal Tampilan</span>
+                      <span class="text-[11px] text-on-surface-variant">Beralih ke mode ${isAdmin ? 'User' : 'Admin'}</span>
+                    </div>
                   </div>
-                </div>
-                <span class="material-symbols-outlined text-sm text-outline">chevron_right</span>
-              </button>
+                  <span class="material-symbols-outlined text-sm text-outline">chevron_right</span>
+                </button>
+              ` : ''}
 
               <button onclick="RoomBookApp.handleLogout()" class="w-full p-3 rounded-xl bg-error-container text-on-error-container hover:bg-error hover:text-on-error flex items-center justify-between text-left transition-colors cursor-pointer mt-1">
                 <div class="flex items-center gap-3">
@@ -4307,6 +4870,11 @@
     // SHELL HEADER & NAVIGATION BUILDERS
     // ==========================================
     renderHeader(title, showBack = false) {
+      const userPending = (RoomBookStore.getUserReservations() || []).filter(b => b.status === 'pending').length;
+      const userNotifText = userPending > 0
+        ? `${userPending} pengajuan Anda masih menunggu persetujuan admin`
+        : 'Semua pengajuan Anda telah terupdate';
+
       return `
         <header class="fixed top-0 w-full z-50 bg-surface/80 backdrop-blur-xl shadow-[0_1px_8px_rgba(0,0,0,0.04)] pt-safe">
           <div class="h-16 px-margin flex items-center justify-between">
@@ -4326,8 +4894,9 @@
               </div>
             </div>
             <div class="flex items-center gap-space-xs">
-              <button aria-label="Notifikasi" onclick="RoomBookApp.showToast('Tidak ada notifikasi baru', 'notifications')" class="min-w-[40px] min-h-[40px] flex items-center justify-center rounded-full text-on-surface-variant hover:text-primary hover:bg-surface-container-high transition-colors" type="button">
+              <button aria-label="Notifikasi" onclick="RoomBookApp.showToast('${userNotifText}', 'notifications')" class="relative min-w-[40px] min-h-[40px] flex items-center justify-center rounded-full text-on-surface-variant hover:text-primary hover:bg-surface-container-high transition-colors" type="button">
                 <span class="material-symbols-outlined text-[22px]">notifications</span>
+                ${userPending > 0 ? '<span class="absolute top-2 right-2 w-2 h-2 bg-error rounded-full"></span>' : ''}
               </button>
               <div onclick="RoomBookApp.navigate('#user/profil')" class="w-8 h-8 rounded-full bg-primary flex items-center justify-center cursor-pointer">
                 <span class="material-symbols-outlined text-on-primary text-[18px]">person</span>
@@ -4339,6 +4908,11 @@
     },
 
     renderAdminHeader(subtitle) {
+      const adminPending = (RoomBookStore.getPendingReservations() || []).length;
+      const adminNotifText = adminPending > 0
+        ? `${adminPending} pengajuan menunggu verifikasi Anda`
+        : 'Tidak ada pengajuan menunggu verifikasi';
+
       return `
         <header class="fixed top-0 w-full z-50 bg-surface/80 backdrop-blur-xl shadow-[0_1px_8px_rgba(0,0,0,0.04)] pt-safe">
           <div class="h-16 px-margin flex items-center justify-between">
@@ -4352,8 +4926,9 @@
               </div>
             </div>
             <div class="flex items-center gap-space-xs">
-              <button aria-label="Notifikasi" onclick="RoomBookApp.showToast('Semua pembaruan fasilitas termonitor', 'notifications')" class="min-w-[40px] min-h-[40px] flex items-center justify-center rounded-full text-on-surface-variant hover:text-primary hover:bg-surface-container-high transition-colors" type="button">
+              <button aria-label="Notifikasi" onclick="RoomBookApp.showToast('${adminNotifText}', 'notifications')" class="relative min-w-[40px] min-h-[40px] flex items-center justify-center rounded-full text-on-surface-variant hover:text-primary hover:bg-surface-container-high transition-colors" type="button">
                 <span class="material-symbols-outlined text-[22px]">notifications</span>
+                ${adminPending > 0 ? '<span class="absolute top-2 right-2 w-2 h-2 bg-error rounded-full"></span>' : ''}
               </button>
               <div onclick="RoomBookApp.navigate('#admin/profil')" class="w-8 h-8 rounded-full bg-primary flex items-center justify-center cursor-pointer">
                 <span class="material-symbols-outlined text-on-primary text-[18px]">manage_accounts</span>

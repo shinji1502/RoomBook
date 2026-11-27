@@ -1,10 +1,13 @@
+import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../data/models/room_model.dart';
 import '../data/services/room_service.dart';
 
 /// State Management untuk Daftar Ruangan
 class RoomProvider extends ChangeNotifier {
   final RoomService _roomService = RoomService();
+  RealtimeChannel? _realtimeChannel;
 
   List<RoomModel> _rooms = [];
   bool _isLoading = false;
@@ -38,6 +41,27 @@ class RoomProvider extends ChangeNotifier {
     }
   }
 
+  /// Menginisialisasi sinkronisasi Realtime tabel public.rooms
+  void initRealtimeSubscription() {
+    if (_realtimeChannel != null) return;
+    try {
+      final client = Supabase.instance.client;
+      _realtimeChannel = client
+          .channel('public:rooms_changes')
+          .onPostgresChanges(
+            event: PostgresChangeEvent.all,
+            schema: 'public',
+            table: 'rooms',
+            callback: (_) {
+              loadRooms();
+            },
+          )
+          .subscribe();
+    } catch (_) {
+      // Abaikan jika realtime channel belum tersedia di jaringan lokal
+    }
+  }
+
   /// Menambah ruangan baru (khusus Admin - Prioritas 3)
   Future<void> createRoom({
     required String name,
@@ -45,17 +69,29 @@ class RoomProvider extends ChangeNotifier {
     required String floor,
     required List<String> facilities,
     String? imageUrl,
+    Uint8List? imageBytes,
+    String? imageFileName,
+    String? imageMimeType,
   }) async {
     _isLoading = true;
     notifyListeners();
 
     try {
+      String? resolvedImageUrl = imageUrl;
+      if (imageBytes != null && imageBytes.isNotEmpty) {
+        resolvedImageUrl = await _roomService.uploadRoomPhotoBytes(
+          imageBytes,
+          fileName: imageFileName ?? 'room.jpg',
+          mimeType: imageMimeType,
+        );
+      }
+
       await _roomService.createRoom(
         name: name,
         capacity: capacity,
         floor: floor,
         facilities: facilities,
-        imageUrl: imageUrl,
+        imageUrl: resolvedImageUrl,
       );
       await loadRooms();
     } catch (e) {
@@ -73,18 +109,30 @@ class RoomProvider extends ChangeNotifier {
     required String floor,
     required List<String> facilities,
     String? imageUrl,
+    Uint8List? imageBytes,
+    String? imageFileName,
+    String? imageMimeType,
   }) async {
     _isLoading = true;
     notifyListeners();
 
     try {
+      String? resolvedImageUrl = imageUrl;
+      if (imageBytes != null && imageBytes.isNotEmpty) {
+        resolvedImageUrl = await _roomService.uploadRoomPhotoBytes(
+          imageBytes,
+          fileName: imageFileName ?? 'room.jpg',
+          mimeType: imageMimeType,
+        );
+      }
+
       await _roomService.updateRoom(
         roomId: roomId,
         name: name,
         capacity: capacity,
         floor: floor,
         facilities: facilities,
-        imageUrl: imageUrl,
+        imageUrl: resolvedImageUrl,
       );
       await loadRooms();
     } catch (e) {
@@ -109,6 +157,12 @@ class RoomProvider extends ChangeNotifier {
       notifyListeners();
       rethrow;
     }
+  }
+
+  @override
+  void dispose() {
+    _realtimeChannel?.unsubscribe();
+    super.dispose();
   }
 }
 

@@ -118,10 +118,7 @@
       availableUntil: 'Sepanjang Hari',
       shortNote: `Kapasitas ${cap} orang • ${facilitiesSummary || 'Fasilitas lengkap'}`,
       facilities: facilitiesList,
-      scheduleToday: [
-        { time: '08:00 - 12:00', title: 'Tersedia Bebas', status: 'available', label: 'Kosong' },
-        { time: '13:00 - 18:00', title: 'Tersedia untuk Booking', status: 'available', label: 'Kosong' }
-      ],
+      scheduleToday: [],
       isFromDatabase: true,
       created_at: dbRoom.created_at
     };
@@ -407,11 +404,98 @@
     }
   }
 
+  /**
+   * Memperbarui data ruangan via Supabase RPC admin_update_room
+   * @param {Object} params - { roomId, name, capacity, floor, facilities, imageFile }
+   */
+  async function updateRoom({ roomId, name, capacity, floor, facilities, imageFile }) {
+    const client = window.supabaseClient;
+    if (!client) {
+      return { data: null, error: new Error('Client Supabase belum diinisialisasi.') };
+    }
+
+    const numericId = parseInt(roomId, 10);
+    const cleanName = String(name || '').trim();
+    const numericCap = parseInt(capacity, 10);
+    const cleanFloor = String(floor || '').trim() || 'Lantai 1';
+    const cleanFacilities = Array.isArray(facilities)
+      ? facilities.map(f => String(f).trim()).filter(Boolean)
+      : [];
+
+    if (isNaN(numericId) || numericId <= 0) {
+      return { data: null, error: new Error('ID ruangan tidak valid.') };
+    }
+    if (!cleanName) {
+      return { data: null, error: new Error('Nama ruangan wajib diisi.') };
+    }
+    if (isNaN(numericCap) || numericCap <= 0) {
+      return { data: null, error: new Error('Kapasitas ruangan harus berupa angka lebih dari 0.') };
+    }
+
+    try {
+      let imageUrl = null;
+      let storageMode = 'unchanged';
+      if (imageFile) {
+        const uploadRes = await uploadRoomPhoto(imageFile);
+        imageUrl = uploadRes.url;
+        storageMode = uploadRes.storageMode;
+      }
+
+      const payload = {
+        p_room_id: numericId,
+        p_name: cleanName,
+        p_capacity: numericCap,
+        p_floor: cleanFloor,
+        p_facilities: cleanFacilities,
+        p_image_url: imageUrl
+      };
+
+      const { data, error } = await client.rpc('admin_update_room', payload);
+      if (error) {
+        console.error('❌ [RoomService] RPC admin_update_room gagal:', error);
+        return { data: null, error };
+      }
+
+      return { data, error: null, storageMode };
+    } catch (err) {
+      console.error('❌ [RoomService] Unexpected error on updateRoom:', err);
+      return { data: null, error: err };
+    }
+  }
+
+  /**
+   * Mengambil jadwal terisi ruangan pada tanggal tertentu via RPC get_room_schedule
+   * @param {string|number} roomId
+   * @param {string} isoDate - YYYY-MM-DD
+   */
+  async function fetchRoomSchedule(roomId, isoDate) {
+    const client = window.supabaseClient;
+    const numericId = parseInt(roomId, 10);
+    if (!client || isNaN(numericId) || numericId <= 0 || !isoDate) {
+      return { data: [], error: null };
+    }
+
+    try {
+      const { data, error } = await client.rpc('get_room_schedule', {
+        p_room_id: numericId,
+        p_date: isoDate
+      });
+      if (error) {
+        return { data: [], error };
+      }
+      return { data: Array.isArray(data) ? data : [], error: null };
+    } catch (err) {
+      return { data: [], error: err };
+    }
+  }
+
   // Ekspor service ke global window
   window.RoomService = {
     fetchRooms,
     fetchRoomById,
+    fetchRoomSchedule,
     createRoom,
+    updateRoom,
     deleteRoom,
     uploadRoomPhoto,
     compressImageFile,
