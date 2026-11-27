@@ -1,0 +1,10 @@
+{
+  "name": "RoomBook Mobile",
+  "short_name": "RoomBook",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#F7F9FB",
+  "theme_color": "#1A146B",
+  "description": "RoomBook Mobile - Aplikasi Pemesanan Ruangan Kampus & Kantor"
+}
+
